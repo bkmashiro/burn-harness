@@ -121,15 +121,12 @@ export const yoloCommand = new Command("yolo")
       }
 
       const activeChildren = new Set<ReturnType<typeof fork>>();
-      let stopped = false;
 
       const cleanup = () => {
-        stopped = true;
         console.log(chalk.yellow("\n  Stopping all agents..."));
         for (const child of activeChildren) {
           child.kill("SIGTERM");
         }
-        // Force kill after 5s if still alive
         setTimeout(() => {
           for (const child of activeChildren) {
             child.kill("SIGKILL");
@@ -140,32 +137,36 @@ export const yoloCommand = new Command("yolo")
       process.on("SIGINT", cleanup);
       process.on("SIGTERM", cleanup);
 
-      // Process repos in batches of maxParallel
+      // Worker pool: spawn up to maxParallel, as one finishes start next
       const queue = [...targetDirs];
-      while (queue.length > 0 && !stopped) {
-        const batch = queue.splice(0, maxParallel);
-        const batchPromises = batch.map((dir) => {
-          const child = spawnRepo(dir);
-          activeChildren.add(child);
+      await new Promise<void>((resolveAll) => {
+        let finished = 0;
+        const total = targetDirs.length;
 
-          return new Promise<void>((resolve) => {
+        function fillPool() {
+          while (activeChildren.size < maxParallel && queue.length > 0) {
+            const dir = queue.shift()!;
+            const child = spawnRepo(dir);
+            activeChildren.add(child);
+
             child.on("close", (code) => {
               activeChildren.delete(child);
               const name = path.basename(dir);
               console.log(
                 `  ${chalk.cyan(`[${name}]`)} ${code === 0 ? chalk.green("done") : chalk.red(`exited ${code}`)}`
               );
-              resolve();
+              finished++;
+              if (finished >= total) {
+                resolveAll();
+              } else {
+                fillPool(); // Start next repo in the freed slot
+              }
             });
-          });
-        });
+          }
+        }
 
-        await Promise.all(batchPromises);
-      }
-
-      if (stopped) {
-        console.log(chalk.yellow("  All agents stopped.\n"));
-      }
+        fillPool();
+      });
 
       process.off("SIGINT", cleanup);
       process.off("SIGTERM", cleanup);

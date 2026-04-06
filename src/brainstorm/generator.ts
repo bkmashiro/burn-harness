@@ -195,19 +195,59 @@ export class BrainstormGenerator {
     suggestions: BrainstormSuggestion[]
   ): Promise<BrainstormSuggestion[]> {
     const db = getDb();
+
+    // Check brainstorm history
     const history = db
       .prepare(
         "SELECT title FROM brainstorm_history WHERE status IN ('suggested', 'approved', 'rejected')"
       )
       .all() as { title: string }[];
 
-    const existingTitles = new Set(
-      history.map((h) => h.title.toLowerCase())
+    // Check existing tasks (pending, executing, reviewing, done)
+    const existingTasks = db
+      .prepare("SELECT title FROM tasks WHERE status NOT IN ('cancelled', 'failed')")
+      .all() as { title: string }[];
+
+    // Check existing burn branches (remote) to avoid duplicating work already pushed
+    let existingBranches: string[] = [];
+    try {
+      const { execSync } = await import("node:child_process");
+      const branches = execSync("git branch -r", {
+        cwd: this.projectRoot,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      existingBranches = branches
+        .split("\n")
+        .map((b) => b.trim())
+        .filter((b) => b.includes("burn/"));
+    } catch {
+      // ignore
+    }
+
+    const existingTitles = new Set([
+      ...history.map((h) => h.title.toLowerCase()),
+      ...existingTasks.map((t) => t.title.toLowerCase()),
+    ]);
+
+    // Also build a set of slugified branch keywords for fuzzy matching
+    const branchKeywords = new Set(
+      existingBranches.map((b) => {
+        // extract the slug part: burn/type/id/slug → slug
+        const parts = b.split("/");
+        return parts.slice(4).join("-").toLowerCase();
+      }).filter(Boolean)
     );
 
-    return suggestions.filter(
-      (s) => !existingTitles.has(s.title.toLowerCase())
-    );
+    return suggestions.filter((s) => {
+      const titleLower = s.title.toLowerCase();
+      // Exact title match
+      if (existingTitles.has(titleLower)) return false;
+      // Fuzzy: check if the slug of the title matches an existing branch
+      const slug = titleLower.replace(/[^a-z0-9]+/g, "-").slice(0, 40);
+      if (branchKeywords.has(slug)) return false;
+      return true;
+    });
   }
 
   private recordSuggestion(

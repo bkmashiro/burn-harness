@@ -8,6 +8,7 @@ import { statusCommand } from "./commands/status.js";
 import { initCommand } from "./commands/init.js";
 import { rollbackCommand } from "./commands/rollback.js";
 import { reportCommand } from "./commands/report.js";
+import { yoloCommand } from "./commands/yolo.js";
 import { getDb } from "../db/client.js";
 import { startInteractive } from "./interactive.js";
 
@@ -25,6 +26,7 @@ program.addCommand(startCommand);
 program.addCommand(statusCommand);
 program.addCommand(rollbackCommand);
 program.addCommand(reportCommand);
+program.addCommand(yoloCommand);
 
 // Interactive REPL mode — the default when no subcommand is given
 program

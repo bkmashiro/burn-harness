@@ -524,13 +524,11 @@ Be specific and actionable. Include file paths where possible.`;
   });
 
   let output = "";
-  process.stdout.write(chalk.dim("  "));
 
   const result = await monitorProcess(
     (cliProcess as any).process,
     (event: any) => {
       if (event.type === "progress" && event.message) {
-        process.stdout.write(chalk.dim("."));
         output += event.message;
       }
       if (event.type === "completion" && event.result) {
@@ -544,8 +542,6 @@ Be specific and actionable. Include file paths where possible.`;
   for (const event of result.events) {
     if (event.type === "completion" && event.result) output += event.result;
   }
-
-  console.log("\n");
 
   try {
     // Try to find a JSON array in the output

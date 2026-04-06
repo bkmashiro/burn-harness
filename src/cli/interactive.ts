@@ -718,7 +718,7 @@ Be specific — include file paths and concrete instructions.`;
   }
   console.log(chalk.dim(`  CLI: ${adapter.name}\n`));
 
-  process.stdout.write(chalk.dim("  Planning"));
+  console.log(chalk.dim("  Planning..."));
   const cliProcess = adapter.execute({
     prompt,
     cwd: state.projectRoot,
@@ -730,7 +730,7 @@ Be specific — include file paths and concrete instructions.`;
   const result = await monitorProcess(
     cliProcess.process,
     (event) => {
-      if (event.type === "progress") process.stdout.write(chalk.dim("."));
+      if (event.type === "progress") /* progress tick suppressed */
       if (event.message) output += event.message;
       if (event.result) output += event.result;
     },
@@ -854,7 +854,7 @@ Be specific and actionable.`;
     cliProcess.process,
     (event) => {
       if (event.type === "progress" && event.message) {
-        process.stdout.write(chalk.dim("."));
+        /* progress tick suppressed */
       }
     },
     undefined,
@@ -1037,7 +1037,7 @@ Be specific about what each task should do and which files it should touch.`;
   const result = await monitorProcess(
     cliProcess.process,
     (event) => {
-      if (event.type === "progress") process.stdout.write(chalk.dim("."));
+      if (event.type === "progress") /* progress tick suppressed */
       if (event.message) planOutput += event.message;
       if (event.result) planOutput += event.result;
     },

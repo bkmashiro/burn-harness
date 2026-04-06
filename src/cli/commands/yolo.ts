@@ -2,7 +2,9 @@ import { Command } from "commander";
 import chalk from "chalk";
 import fs from "node:fs";
 import path from "node:path";
-import { getDb, closeDb } from "../../db/client.js";
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { getDb } from "../../db/client.js";
 import { loadConfig } from "../../config/loader.js";
 import { addTask, getQueueStats } from "../../core/task-queue.js";
 import { Orchestrator } from "../../core/orchestrator.js";
@@ -66,21 +68,79 @@ export const yoloCommand = new Command("yolo")
       }
     }
 
-    // For multi-repo: run sequentially on each repo
-    // For single repo: use it as project root
+    // Multi-repo: fork a child process per repo (each gets its own DB singleton)
     if (targetDirs.length > 1) {
       console.log(YOLO_BANNER);
-      console.log(chalk.dim(`  Working on ${targetDirs.length} repositories:\n`));
+      console.log(chalk.bold(`  Burning ${targetDirs.length} repositories in parallel:\n`));
       for (const dir of targetDirs) {
-        console.log(chalk.dim(`    ${dir}`));
+        console.log(chalk.dim(`    ${path.basename(dir).padEnd(25)} ${dir}`));
       }
       console.log();
 
-      for (const dir of targetDirs) {
-        console.log(chalk.bold(`\n  ═══ ${path.basename(dir)} ═══\n`));
-        closeDb(); // Reset DB singleton for each repo
-        await runYoloOnRepo(dir, focus, opts);
-      }
+      // Fork a child process for each repo
+      const cliEntry = path.resolve(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "index.js"
+      );
+
+      const children = targetDirs.map((dir) => {
+        const args = ["yolo"];
+        if (focus) args.push(focus);
+        args.push("--workers", opts.workers as string ?? "1");
+        if (opts.budget) args.push("--budget", opts.budget as string);
+        if (opts.seed) args.push("--seed", opts.seed as string);
+        if (opts.dryRun) args.push("--dry-run");
+
+        const child = fork(cliEntry, args, {
+          cwd: dir,
+          stdio: ["pipe", "pipe", "pipe", "ipc"],
+          env: { ...process.env },
+        });
+
+        const prefix = chalk.cyan(`[${path.basename(dir)}]`);
+
+        child.stdout?.on("data", (data: Buffer) => {
+          for (const line of data.toString().split("\n")) {
+            if (line.trim()) console.log(`  ${prefix} ${line}`);
+          }
+        });
+
+        child.stderr?.on("data", (data: Buffer) => {
+          for (const line of data.toString().split("\n")) {
+            if (line.trim()) console.log(`  ${prefix} ${chalk.dim(line)}`);
+          }
+        });
+
+        return { dir, child, name: path.basename(dir) };
+      });
+
+      // Handle Ctrl+C — kill all children
+      const cleanup = () => {
+        for (const { child } of children) {
+          child.kill("SIGTERM");
+        }
+      };
+      process.on("SIGINT", cleanup);
+      process.on("SIGTERM", cleanup);
+
+      // Wait for all children to finish
+      await Promise.all(
+        children.map(
+          ({ child, name }) =>
+            new Promise<void>((resolve) => {
+              child.on("close", (code) => {
+                console.log(
+                  `  ${chalk.cyan(`[${name}]`)} ${code === 0 ? chalk.green("done") : chalk.red(`exited ${code}`)}`
+                );
+                resolve();
+              });
+            })
+        )
+      );
+
+      process.off("SIGINT", cleanup);
+      process.off("SIGTERM", cleanup);
       return;
     }
 

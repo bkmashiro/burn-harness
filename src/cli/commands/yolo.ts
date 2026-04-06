@@ -244,11 +244,16 @@ export const yoloCommand = new Command("yolo")
 
         rotationCount++;
 
-        // Wait for the rotation interval
+        // Wait for rotation interval, but rotate early if all active slots exited
         const rotateMs = rotateMinutes * 60_000;
         const deadline = Date.now() + rotateMs;
         while (Date.now() < deadline && !stopped) {
-          await new Promise(r => setTimeout(r, 5000));
+          await new Promise(r => setTimeout(r, 10000));
+          // Early rotation: if all children in this batch have exited, no point waiting
+          if (activeSlots.size === 0) {
+            console.log(chalk.dim("  All slots idle — rotating early."));
+            break;
+          }
         }
       }
 

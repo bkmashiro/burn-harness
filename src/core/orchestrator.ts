@@ -165,7 +165,8 @@ export class Orchestrator {
 
   private async brainstormLoop(): Promise<void> {
     while (this.running) {
-      await new Promise((resolve) => setTimeout(resolve, 30_000));
+      // Poll quickly — 5s instead of 30s so we brainstorm ASAP when idle
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
 
       if (!this.running) break;
 

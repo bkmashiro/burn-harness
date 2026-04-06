@@ -121,18 +121,28 @@ export const yoloCommand = new Command("yolo")
       }
 
       const activeChildren = new Set<ReturnType<typeof fork>>();
+      let stopped = false;
 
       const cleanup = () => {
+        stopped = true;
+        console.log(chalk.yellow("\n  Stopping all agents..."));
         for (const child of activeChildren) {
           child.kill("SIGTERM");
         }
+        // Force kill after 5s if still alive
+        setTimeout(() => {
+          for (const child of activeChildren) {
+            child.kill("SIGKILL");
+          }
+          process.exit(0);
+        }, 5000);
       };
       process.on("SIGINT", cleanup);
       process.on("SIGTERM", cleanup);
 
       // Process repos in batches of maxParallel
       const queue = [...targetDirs];
-      while (queue.length > 0) {
+      while (queue.length > 0 && !stopped) {
         const batch = queue.splice(0, maxParallel);
         const batchPromises = batch.map((dir) => {
           const child = spawnRepo(dir);
@@ -151,6 +161,10 @@ export const yoloCommand = new Command("yolo")
         });
 
         await Promise.all(batchPromises);
+      }
+
+      if (stopped) {
+        console.log(chalk.yellow("  All agents stopped.\n"));
       }
 
       process.off("SIGINT", cleanup);

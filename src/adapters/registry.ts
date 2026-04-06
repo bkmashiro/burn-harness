@@ -1,9 +1,10 @@
 import type { CLIAdapter } from "./types.js";
 import { ClaudeAdapter } from "./claude.js";
 import { CodexAdapter } from "./codex.js";
+import { CustomAdapter, type CustomAdapterConfig } from "./custom.js";
 import type { BurnConfig } from "../config/schema.js";
 
-const adapterFactories: Record<string, () => CLIAdapter> = {
+const builtinFactories: Record<string, () => CLIAdapter> = {
   claude: () => new ClaudeAdapter(),
   codex: () => new CodexAdapter(),
 };
@@ -14,14 +15,25 @@ export class AdapterRegistry {
 
   constructor(private config: BurnConfig) {
     for (const name of config.cli.preference) {
-      const factory = adapterFactories[name];
+      // Built-in adapters
+      const factory = builtinFactories[name];
       if (factory) {
         this.adapters.set(name, factory());
+        continue;
+      }
+
+      // Custom adapter — check if there's a custom config
+      const customConfig = (config.cli as Record<string, unknown>)[name];
+      if (customConfig && typeof customConfig === "object" && "command" in customConfig) {
+        this.adapters.set(
+          name,
+          new CustomAdapter(customConfig as CustomAdapterConfig)
+        );
       }
     }
   }
 
-  async selectAdapter(taskType?: string): Promise<CLIAdapter | null> {
+  async selectAdapter(_taskType?: string): Promise<CLIAdapter | null> {
     const now = Date.now();
 
     for (const name of this.config.cli.preference) {

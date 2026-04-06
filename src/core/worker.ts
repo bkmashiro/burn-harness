@@ -164,17 +164,24 @@ export class Worker {
       task.current_attempt
     );
 
+    // Get permission mode from CLI config — default to dangerously-skip for autonomous operation
+    const cliConfig = this.config.cli[adapter.name as keyof typeof this.config.cli];
+    const permissionMode = (cliConfig && typeof cliConfig === "object" && "permissionMode" in cliConfig)
+      ? (cliConfig as Record<string, unknown>).permissionMode as string
+      : "dangerously-skip";
+
     this.log("Invoking CLI", {
       taskId: task.id,
       cli: adapter.name,
       model: selectedModel ?? "default",
+      permissionMode,
       branch: branchName,
     });
 
     let sessionId: string | undefined;
 
     try {
-      // Invoke CLI
+
       const cliProcess = adapter.execute({
         prompt,
         cwd: worktreePath,
@@ -182,6 +189,7 @@ export class Worker {
         budgetUsd: task.budget_limit_usd ?? this.config.safety.maxBudgetPerTaskUsd ?? undefined,
         timeoutMs: this.config.execution.taskTimeoutMinutes * 60 * 1000,
         appendPrompt: this.config.preferences.style ?? undefined,
+        permissionMode,
       });
 
       const result = await monitorProcess(
@@ -204,6 +212,17 @@ export class Worker {
 
       const taskRuntimeMs = Date.now() - taskStartTime;
       this.costTracker.addRuntime(taskRuntimeMs);
+
+      this.log("CLI process exited", {
+        taskId: task.id,
+        exitCode: result.exitCode,
+        rateLimited: result.rateLimited,
+        tokensIn: result.tokensIn,
+        tokensOut: result.tokensOut,
+        costUsd: result.costUsd,
+        runtimeMs: taskRuntimeMs,
+        eventsCount: result.events.length,
+      });
 
       // Record costs
       if (result.costUsd > 0) {
@@ -346,6 +365,7 @@ export class Worker {
       validateBranchForPush(branchName, this.config.git.branchPrefix)
     ) {
       try {
+        this.log("Pushing branch", { taskId: task.id, branch: branchName });
         pushBranch(worktreePath, branchName);
 
         const prBody = [

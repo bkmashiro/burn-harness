@@ -12,9 +12,9 @@ cli:
 
   claude:
     # Model selection: string or array (first = primary, rest = fallbacks)
-    # On rate-limit, automatically falls back to next model in the list
     model: [sonnet, opus]     # Try sonnet first, fall back to opus
-    # model: sonnet            # Or just a single model
+    # Required for autonomous operation (--print mode can't prompt for approval)
+    permissionMode: dangerously-skip
     # appendSystemPrompt: |
     #   Follow project conventions strictly.
 

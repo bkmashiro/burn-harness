@@ -82,8 +82,13 @@ export class ClaudeAdapter implements CLIAdapter {
       args.push("--append-system-prompt", params.appendPrompt);
     }
 
-    // Use auto permission mode — safer than dangerously-skip
-    args.push("--permission-mode", "auto");
+    // Permission mode: dangerously-skip for autonomous operation,
+    // auto requires user approval which blocks in --print mode
+    if (params.permissionMode === "dangerously-skip") {
+      args.push("--dangerously-skip-permissions");
+    } else {
+      args.push("--permission-mode", params.permissionMode ?? "auto");
+    }
 
     args.push("--", params.prompt);
 

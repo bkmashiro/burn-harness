@@ -34,6 +34,7 @@ export interface ExecuteParams {
   budgetUsd?: number;
   timeoutMs?: number;
   allowedTools?: string[];
+  permissionMode?: string;
   env?: Record<string, string>;
 }
 

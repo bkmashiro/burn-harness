@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import fs from "node:fs";
 import path from "node:path";
-import { fork } from "node:child_process";
+import { fork, execSync as execSyncFn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getDb } from "../../db/client.js";
 import { loadConfig } from "../../config/loader.js";
@@ -85,6 +85,29 @@ export const yoloCommand = new Command("yolo")
         console.log(chalk.dim(`    ${path.basename(dir).padEnd(25)} ${dir}`));
       }
       console.log();
+
+      // ── Scout Phase: rank repos by how much work they need ──
+      console.log(chalk.cyan("  🔍 Scout phase: analyzing all repos to prioritize...\n"));
+
+      const repoScores = await scoutRepos(targetDirs, focus);
+
+      // Sort by score descending (most work needed first)
+      const rankedDirs = [...targetDirs].sort((a, b) => {
+        return (repoScores.get(b) ?? 0) - (repoScores.get(a) ?? 0);
+      });
+
+      console.log(chalk.bold("  Priority order:\n"));
+      for (let i = 0; i < rankedDirs.length; i++) {
+        const dir = rankedDirs[i];
+        const score = repoScores.get(dir) ?? 0;
+        const bar = score > 0 ? "█".repeat(Math.min(20, Math.round(score / 5))) : "░";
+        console.log(`  ${chalk.dim(`${i + 1}.`)} ${path.basename(dir).padEnd(25)} ${chalk.yellow(bar)} ${score > 0 ? `score: ${score}` : chalk.dim("no data")}`);
+      }
+      console.log();
+
+      // Replace targetDirs ordering with ranked order
+      targetDirs.length = 0;
+      targetDirs.push(...rankedDirs);
 
       const cliEntry = path.resolve(
         path.dirname(fileURLToPath(import.meta.url)),
@@ -228,6 +251,120 @@ export const yoloCommand = new Command("yolo")
 
     await runYoloOnRepo(projectRoot, focus, opts);
   });
+
+/**
+ * Scout phase: quickly analyze each repo's health to prioritize.
+ * No AI calls — pure filesystem analysis. Instant.
+ *
+ * Scoring heuristic (higher = more work needed):
+ *   +20  no tests at all
+ *   +15  no README or empty README
+ *   +10  no .gitignore
+ *   +5   per 100 source files (bigger repos need more work)
+ *   +10  no CI config
+ *   +5   has TODO/FIXME in source
+ *   +3   no type config (tsconfig/pyproject)
+ *   -10  already has .burn/ with done tasks (already worked on)
+ */
+async function scoutRepos(
+  dirs: string[],
+  _focus: string | undefined
+): Promise<Map<string, number>> {
+  const exec = execSyncFn;
+  const scores = new Map<string, number>();
+
+  for (const dir of dirs) {
+    let score = 0;
+
+    try {
+      // Count source files
+      const srcFiles = countFiles(dir, [".ts", ".js", ".py", ".rs", ".go", ".java"]);
+      score += Math.floor(srcFiles / 20); // +1 per 20 files
+
+      // Check for tests
+      const hasTests = fs.existsSync(path.join(dir, "test")) ||
+        fs.existsSync(path.join(dir, "tests")) ||
+        fs.existsSync(path.join(dir, "__tests__")) ||
+        fs.existsSync(path.join(dir, "spec"));
+      const testFiles = countFiles(dir, [".test.ts", ".test.js", ".spec.ts", ".spec.js", "_test.go", "_test.rs"]);
+      if (!hasTests && testFiles === 0) score += 20;
+      else if (testFiles > 0 && srcFiles > 0) {
+        // Low test ratio
+        const ratio = testFiles / srcFiles;
+        if (ratio < 0.1) score += 15;
+        else if (ratio < 0.3) score += 8;
+      }
+
+      // Check for README
+      const readme = path.join(dir, "README.md");
+      if (!fs.existsSync(readme)) {
+        score += 15;
+      } else {
+        const size = fs.statSync(readme).size;
+        if (size < 200) score += 10; // Stub README
+      }
+
+      // Check for .gitignore
+      if (!fs.existsSync(path.join(dir, ".gitignore"))) score += 10;
+
+      // Check for CI
+      const hasCI = fs.existsSync(path.join(dir, ".github", "workflows")) ||
+        fs.existsSync(path.join(dir, ".gitlab-ci.yml")) ||
+        fs.existsSync(path.join(dir, "Jenkinsfile"));
+      if (!hasCI) score += 10;
+
+      // Check for type config
+      const hasTypes = fs.existsSync(path.join(dir, "tsconfig.json")) ||
+        fs.existsSync(path.join(dir, "pyproject.toml")) ||
+        fs.existsSync(path.join(dir, "Cargo.toml"));
+      if (!hasTypes && srcFiles > 0) score += 3;
+
+      // Check for TODOs
+      try {
+        const todoCount = exec(
+          `grep -r "TODO\\|FIXME\\|HACK\\|XXX" --include="*.ts" --include="*.js" --include="*.py" --include="*.rs" -c . 2>/dev/null | tail -1`,
+          { cwd: dir, encoding: "utf-8", timeout: 5000 }
+        ).trim();
+        const n = parseInt(todoCount, 10);
+        if (n > 0) score += Math.min(10, n);
+      } catch { /* no matches or timeout */ }
+
+      // Discount repos already worked on
+      const burnDb = path.join(dir, ".burn", "burn.db");
+      if (fs.existsSync(burnDb)) {
+        try {
+          const done = exec(
+            `sqlite3 "${burnDb}" "SELECT COUNT(*) FROM tasks WHERE status='done'" 2>/dev/null`,
+            { encoding: "utf-8", timeout: 3000 }
+          ).trim();
+          const doneCount = parseInt(done, 10);
+          if (doneCount > 0) score -= Math.min(15, doneCount * 3);
+        } catch { /* ignore */ }
+      }
+
+    } catch {
+      score = 50; // Can't analyze = probably needs work
+    }
+
+    scores.set(dir, Math.max(0, score));
+  }
+
+  return scores;
+}
+
+function countFiles(dir: string, extensions: string[]): number {
+  let count = 0;
+  try {
+    for (const ext of extensions) {
+      const result = execSyncFn(
+        `find . -name "*${ext}" -not -path "*/node_modules/*" -not -path "*/dist/*" -not -path "*/.next/*" | wc -l`,
+        { cwd: dir, encoding: "utf-8", timeout: 5000 }
+      ).trim();
+      count += parseInt(result, 10) || 0;
+    }
+  } catch { /* ignore */ }
+  return count;
+}
 
 async function runYoloOnRepo(
   projectRoot: string,

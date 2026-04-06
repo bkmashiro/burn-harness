@@ -15,9 +15,13 @@ import {
   type Task,
   type AddTaskInput,
 } from "../core/task-queue.js";
+import { execSync } from "node:child_process";
 import { Orchestrator } from "../core/orchestrator.js";
 import { AdapterRegistry } from "../adapters/registry.js";
 import { monitorProcess } from "../monitor/output-parser.js";
+import { updateTaskStatus } from "../core/task-queue.js";
+import { closePR } from "../git/pr.js";
+import { deleteBranch } from "../git/branch.js";
 import type { BurnConfig } from "../config/schema.js";
 
 const BANNER = `
@@ -31,36 +35,39 @@ const HELP_TEXT = `
 ${chalk.bold("Commands:")}
 
   ${chalk.cyan("Task Management")}
-  ${chalk.bold("/add")} ${chalk.dim("<description>")}     Add a task to the queue
+  ${chalk.bold("/add")} ${chalk.dim("<description>")}     Add a task ${chalk.dim('e.g. /add Fix the auth bug')}
   ${chalk.bold("/add-interactive")}            Guided task creation wizard
-  ${chalk.bold("/queue")}  ${chalk.dim("or")} ${chalk.bold("/q")}             Show the task queue
-  ${chalk.bold("/status")}                     Show system status
-  ${chalk.bold("/promote")} ${chalk.dim("<id>")}             Move task to front
-  ${chalk.bold("/retry")} ${chalk.dim("<id>")}               Retry a failed task
+  ${chalk.bold("/show")} ${chalk.dim("<id>")}                Show full task details + attempt history
+  ${chalk.bold("/queue")} ${chalk.dim("[filter]")}          Show task queue ${chalk.dim('e.g. /queue status=failed  /queue type=bug')}
+  ${chalk.bold("/promote")} ${chalk.dim("<id>")}             Move task to front of queue
+  ${chalk.bold("/retry")} ${chalk.dim("<id>")}               Reset a failed task for retry
   ${chalk.bold("/cancel")} ${chalk.dim("<id>")}              Cancel a task
-  ${chalk.bold("/rollback")} ${chalk.dim("<id>")}            Undo a task's changes
-  ${chalk.bold("/report")}                     Cost and usage report
-  ${chalk.bold("/budget")}                     Show budget limits and usage
+  ${chalk.bold("/rollback")} ${chalk.dim("<id>")}            Undo changes (delete branch, close PR)
 
   ${chalk.cyan("Agent Control")}
-  ${chalk.bold("/start")}                      Start the agent loop
+  ${chalk.bold("/start")} ${chalk.dim("[options]")}         Start agent loop ${chalk.dim('e.g. /start --workers 3 --profile aggressive')}
   ${chalk.bold("/stop")}                       Stop the agent loop
-  ${chalk.bold("/brainstorm")}                 Run brainstorm now (agent analyzes codebase)
-  ${chalk.bold("/review")}                     Review brainstormed suggestions
+  ${chalk.bold("/brainstorm")}                 AI analyzes codebase for improvements
+  ${chalk.bold("/review")}                     Approve/reject brainstormed suggestions
 
-  ${chalk.cyan("Interactive Modes")}
-  ${chalk.bold("/plan")} ${chalk.dim("<goal>")}               Plan a project with AI (break into tasks)
-  ${chalk.bold("/chat")} ${chalk.dim("<question>")}           Ask the AI agent a question about the codebase
-  ${chalk.bold("/refine")} ${chalk.dim("<id>")}               Refine a task's description with AI help
+  ${chalk.cyan("AI Workflows")}
+  ${chalk.bold("/plan")} ${chalk.dim("<goal>")}               Break a goal into tasks ${chalk.dim('e.g. /plan Add OAuth2 auth')}
+  ${chalk.bold("/chat")} ${chalk.dim("<question>")}           Ask about the codebase ${chalk.dim('e.g. /chat How does routing work?')}
+  ${chalk.bold("/refine")} ${chalk.dim("<id>")}               AI improves a task description
+
+  ${chalk.cyan("Budget & Reports")}
+  ${chalk.bold("/budget")}                     Budget dashboard with progress bars
+  ${chalk.bold("/report")}                     Cost and usage report (last 7 days)
+  ${chalk.bold("/status")}                     System status overview
+  ${chalk.bold("/config")}                     Show current configuration
 
   ${chalk.cyan("System")}
-  ${chalk.bold("/config")}                     Show current config
   ${chalk.bold("/help")}  ${chalk.dim("or")} ${chalk.bold("/?")}              Show this help
   ${chalk.bold("/clear")}                      Clear the screen
   ${chalk.bold("/exit")}  ${chalk.dim("or")} ${chalk.bold("Ctrl+C")}          Exit
 
-  ${chalk.dim("Tip: Just type naturally! Anything without / prefix is treated as")}
-  ${chalk.dim('a new task to add. e.g. "Fix the login bug" adds it directly.')}
+  ${chalk.dim("Just type naturally — anything without / is added as a task.")}
+  ${chalk.dim('Smart detection: "Fix crash in auth" → type:bug priority:1')}
 `;
 
 type InteractiveState = {
@@ -179,7 +186,12 @@ async function handleInput(
         return;
 
       case "/start":
-        await handleStart(state);
+        await handleStart(argStr, state);
+        return;
+
+      case "/show":
+      case "/detail":
+        handleShow(argStr);
         return;
 
       case "/stop":
@@ -438,35 +450,197 @@ function handleCancel(idSuffix: string): void {
   }
 }
 
+function handleShow(idSuffix: string): void {
+  if (!idSuffix) {
+    console.log(chalk.yellow("  Usage: /show <task-id>"));
+    return;
+  }
+
+  const db = getDb();
+  const rows = db.prepare("SELECT * FROM tasks WHERE id LIKE ?").all(`%${idSuffix}`) as Task[];
+  if (rows.length === 0) {
+    console.log(chalk.yellow("  Task not found. Use /queue to see all tasks."));
+    return;
+  }
+  if (rows.length > 1) {
+    console.log(chalk.yellow("  Multiple matches — be more specific:"));
+    for (const t of rows) {
+      console.log(chalk.dim(`    ${t.id.slice(-6)} — ${t.title.slice(0, 50)}`));
+    }
+    return;
+  }
+
+  const task = rows[0];
+  console.log(chalk.bold(`\n  Task: ${task.title}\n`));
+  console.log(`  ${chalk.dim("ID:")}            ${task.id}`);
+  console.log(`  ${chalk.dim("Short ID:")}      ${task.id.slice(-6)}`);
+  console.log(`  ${chalk.dim("Status:")}        ${colorStatus(task.status)}`);
+  console.log(`  ${chalk.dim("Type:")}          ${task.type}`);
+  console.log(`  ${chalk.dim("Priority:")}      P${task.priority}`);
+  console.log(`  ${chalk.dim("Complexity:")}    ${task.estimated_complexity}`);
+  console.log(`  ${chalk.dim("Source:")}        ${task.source}`);
+  console.log(`  ${chalk.dim("Created:")}       ${task.created_at}`);
+  if (task.started_at) console.log(`  ${chalk.dim("Started:")}       ${task.started_at}`);
+  if (task.completed_at) console.log(`  ${chalk.dim("Completed:")}     ${task.completed_at}`);
+  console.log(`  ${chalk.dim("Attempts:")}      ${task.current_attempt} / ${task.max_attempts}`);
+
+  if (task.estimated_cost_usd > 0) {
+    console.log(`  ${chalk.dim("Cost:")}          $${task.estimated_cost_usd.toFixed(2)}`);
+  }
+  if (task.total_tokens_used > 0) {
+    console.log(`  ${chalk.dim("Tokens:")}        ${task.total_tokens_used.toLocaleString()}`);
+  }
+  if (task.budget_limit_usd) {
+    console.log(`  ${chalk.dim("Budget cap:")}    $${task.budget_limit_usd.toFixed(2)}`);
+  }
+  if (task.branch) console.log(`  ${chalk.dim("Branch:")}        ${task.branch}`);
+  if (task.pr_url) console.log(`  ${chalk.dim("PR:")}            ${task.pr_url}`);
+  if (task.worker_id) console.log(`  ${chalk.dim("Worker:")}        ${task.worker_id}`);
+
+  // Dependencies
+  try {
+    const deps = JSON.parse(task.depends_on) as string[];
+    if (deps.length > 0) {
+      console.log(`  ${chalk.dim("Depends on:")}    ${deps.map(d => d.slice(-6)).join(", ")}`);
+    }
+  } catch { /* ignore */ }
+
+  // Tags
+  try {
+    const tags = JSON.parse(task.tags) as string[];
+    if (tags.length > 0) {
+      console.log(`  ${chalk.dim("Tags:")}          ${tags.join(", ")}`);
+    }
+  } catch { /* ignore */ }
+
+  // Target files
+  if (task.target_files) {
+    try {
+      const files = JSON.parse(task.target_files) as string[];
+      if (files.length > 0) {
+        console.log(`  ${chalk.dim("Target files:")}  ${files.join(", ")}`);
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Description
+  console.log(`\n  ${chalk.dim("Description:")}`);
+  for (const line of task.description.split("\n")) {
+    console.log(`  ${line}`);
+  }
+
+  // Attempt history
+  const attempts = db.prepare("SELECT * FROM attempts WHERE task_id = ? ORDER BY attempt_number").all(task.id) as Array<{
+    attempt_number: number;
+    cli: string;
+    exit_code: number | null;
+    tokens_used: number;
+    cost_usd: number;
+    failure_reason: string | null;
+    started_at: string;
+  }>;
+
+  if (attempts.length > 0) {
+    console.log(`\n  ${chalk.dim("Attempt History:")}`);
+    for (const a of attempts) {
+      const status = a.exit_code === 0 ? chalk.green("OK") : a.exit_code != null ? chalk.red(`exit ${a.exit_code}`) : chalk.dim("?");
+      const cost = a.cost_usd > 0 ? ` $${a.cost_usd.toFixed(2)}` : "";
+      const tokens = a.tokens_used > 0 ? ` ${a.tokens_used.toLocaleString()} tok` : "";
+      console.log(`  #${a.attempt_number} ${a.cli} ${status}${cost}${tokens}${a.failure_reason ? chalk.red(` — ${a.failure_reason}`) : ""}`);
+    }
+  }
+
+  console.log();
+}
+
 function handleRollback(idSuffix: string): void {
   if (!idSuffix) {
     console.log(chalk.yellow("  Usage: /rollback <task-id>"));
     return;
   }
-  // Delegate to the non-interactive rollback logic
-  const { execSync } = require("node:child_process");
-  try {
-    const output = execSync(
-      `node ${process.argv[1]} rollback ${idSuffix}`,
-      { encoding: "utf-8" }
-    );
-    console.log(output);
-  } catch (err: any) {
-    console.log(chalk.red("  Rollback failed: " + (err.stderr || err.message)));
-  }
-}
 
-async function handleStart(state: InteractiveState): Promise<void> {
-  if (state.orchestrator) {
-    console.log(chalk.yellow("  Agent loop is already running."));
+  const db = getDb();
+  const rows = db.prepare("SELECT * FROM tasks WHERE id LIKE ?").all(`%${idSuffix}`) as Task[];
+  if (rows.length === 0) {
+    console.log(chalk.yellow("  Task not found."));
+    return;
+  }
+  if (rows.length > 1) {
+    console.log(chalk.yellow("  Multiple matches — be more specific."));
+    for (const t of rows) {
+      console.log(chalk.dim(`    ${t.id.slice(-6)} — ${t.title.slice(0, 50)}`));
+    }
     return;
   }
 
-  console.log(chalk.cyan("  Starting agent loop in background..."));
-  state.orchestrator = new Orchestrator(
-    state.projectRoot,
-    state.config
-  );
+  const task = rows[0];
+  console.log(`  Rolling back: ${chalk.bold(task.title)} (${task.id.slice(-6)})`);
+  const cwd = process.cwd();
+
+  // Close PR
+  if (task.pr_url) {
+    try {
+      closePR(cwd, task.pr_url);
+      console.log(chalk.green("  + ") + "Closed PR");
+    } catch {
+      console.log(chalk.dim("    PR already closed or not found"));
+    }
+  }
+
+  // Delete branch
+  if (task.branch) {
+    try {
+      execSync(`git push origin --delete "${task.branch}"`, { cwd, stdio: "pipe" });
+      console.log(chalk.green("  + ") + "Deleted remote branch");
+    } catch {
+      console.log(chalk.dim("    Remote branch already deleted or not pushed"));
+    }
+    deleteBranch(cwd, task.branch);
+    console.log(chalk.green("  + ") + "Deleted local branch");
+  }
+
+  updateTaskStatus(task.id, "cancelled");
+  console.log(chalk.green("  + ") + "Task cancelled\n");
+}
+
+async function handleStart(args: string, state: InteractiveState): Promise<void> {
+  if (state.orchestrator) {
+    console.log(chalk.yellow("  Agent loop is already running. Use /stop first."));
+    return;
+  }
+
+  // Parse optional arguments: --workers N --profile NAME --no-brainstorm
+  const config = { ...state.config };
+  config.execution = { ...config.execution };
+  config.brainstorm = { ...config.brainstorm };
+
+  const workerMatch = args.match(/--workers?\s+(\d+)/);
+  if (workerMatch) {
+    config.execution.maxConcurrentAgents = parseInt(workerMatch[1], 10);
+  }
+
+  const profileMatch = args.match(/--profile\s+(\S+)/);
+  let profileName: string | undefined;
+  if (profileMatch) {
+    profileName = profileMatch[1];
+    // Reload config with profile applied
+    const reloaded = loadConfig(state.projectRoot, profileName);
+    Object.assign(config, reloaded);
+  }
+
+  if (args.includes("--no-brainstorm")) {
+    config.brainstorm.enabled = false;
+  }
+
+  const details = [
+    `${config.execution.maxConcurrentAgents} worker${config.execution.maxConcurrentAgents > 1 ? "s" : ""}`,
+    profileName ? `profile: ${profileName}` : null,
+    config.brainstorm.enabled ? "brainstorm: on" : "brainstorm: off",
+  ].filter(Boolean).join(", ");
+
+  console.log(chalk.cyan(`  Starting agent loop (${details})...`));
+
+  state.orchestrator = new Orchestrator(state.projectRoot, config, profileName);
 
   // Run in background — don't await
   state.orchestrator.start().catch((err) => {
@@ -474,10 +648,9 @@ async function handleStart(state: InteractiveState): Promise<void> {
     state.orchestrator = null;
   });
 
-  // Give it a moment to initialize
-  await sleep(1000);
+  await sleep(1500);
 
-  const adapter = await new AdapterRegistry(state.config).selectAdapter();
+  const adapter = await new AdapterRegistry(config).selectAdapter();
   if (adapter) {
     console.log(chalk.green("  + ") + `Agent loop started. Using ${chalk.bold(adapter.name)}.`);
   } else {

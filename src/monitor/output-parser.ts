@@ -119,13 +119,9 @@ export function parseClaudeStreamJson(line: string): OutputEvent | null {
       };
     }
 
-    // Session info
-    if (event.session_id) {
-      return {
-        type: "progress",
-        message: `Session: ${event.session_id}`,
-        raw: line,
-      };
+    // Session info — don't emit as progress (pollutes output)
+    if (event.session_id && !event.type) {
+      return null;
     }
 
     return null;

@@ -169,8 +169,14 @@ export class Orchestrator {
 
       if (!this.running) break;
 
-      // Only brainstorm when queue is empty
       const stats = getQueueStats();
+
+      // Revive failed tasks after cooldown (15 min) — they get another round of attempts
+      if (stats.failed > 0 && stats.pending === 0 && stats.executing === 0) {
+        this.reviveFailedTasks();
+      }
+
+      // Only brainstorm when queue is truly empty
       if (stats.pending > 0 || stats.executing > 0) continue;
 
       if (!this.brainstormer.canRun()) continue;
@@ -193,6 +199,40 @@ export class Orchestrator {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.logger.error({ error: message }, "Brainstorm failed");
+      }
+    }
+  }
+
+  /**
+   * Revive failed tasks after a cooldown period.
+   * Failed tasks get re-queued with reset attempts so the agent can try again
+   * (possibly with a different model after rate-limit fallback).
+   * Tasks that have been revived 3+ times are left as permanently failed.
+   */
+  private reviveFailedTasks(): void {
+    const db = getDb();
+
+    // Only revive tasks that failed more than 15 minutes ago
+    // and haven't been revived too many times (track via max_attempts increases)
+    const revived = db.prepare(`
+      UPDATE tasks
+      SET status = 'pending',
+          current_attempt = 0,
+          worker_id = NULL,
+          max_attempts = max_attempts + 1
+      WHERE status = 'failed'
+        AND completed_at < datetime('now', '-15 minutes')
+        AND max_attempts < 12
+      RETURNING id, title
+    `).all() as { id: string; title: string }[];
+
+    if (revived.length > 0) {
+      this.logger.info(
+        { count: revived.length },
+        "Revived failed tasks for retry"
+      );
+      for (const t of revived) {
+        this.logger.info({ taskId: t.id, title: t.title }, "Revived");
       }
     }
   }

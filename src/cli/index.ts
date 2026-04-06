@@ -9,7 +9,7 @@ import { initCommand } from "./commands/init.js";
 import { rollbackCommand } from "./commands/rollback.js";
 import { reportCommand } from "./commands/report.js";
 import { getDb } from "../db/client.js";
-
+import { startInteractive } from "./interactive.js";
 
 const program = new Command()
   .name("burn")
@@ -25,6 +25,15 @@ program.addCommand(startCommand);
 program.addCommand(statusCommand);
 program.addCommand(rollbackCommand);
 program.addCommand(reportCommand);
+
+// Interactive REPL mode — the default when no subcommand is given
+program
+  .command("interactive")
+  .alias("i")
+  .description("Start interactive mode (REPL with guided workflows)")
+  .action(async () => {
+    await startInteractive();
+  });
 
 program
   .command("stop")
@@ -68,4 +77,13 @@ program
     console.log(`Task cancelled.`);
   });
 
-program.parse();
+// Default: if no command given and stdin is a TTY, start interactive mode
+const args = process.argv.slice(2);
+if (args.length === 0 && process.stdin.isTTY) {
+  startInteractive().catch((err) => {
+    console.error("Fatal:", err);
+    process.exit(1);
+  });
+} else {
+  program.parse();
+}

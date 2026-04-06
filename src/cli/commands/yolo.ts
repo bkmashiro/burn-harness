@@ -36,9 +36,9 @@ ${chalk.dim("  Ctrl+C to stop anytime.")}
 export const yoloCommand = new Command("yolo")
   .description("Fire-and-forget autonomous mode — agents brainstorm and burn non-stop")
   .argument("[focus]", "Optional focus hint for the AI (e.g. 'tests', 'security', 'refactor auth')")
-  .option("--workers <n>", "Number of concurrent agents", "1")
+  .option("--workers <n>", "Total concurrent agents across all repos (default: 1, max ~5 for Claude)", "1")
   .option("--profile <name>", "Config profile to use")
-  .option("--budget <usd>", "Daily budget cap in USD")
+  .option("--budget <usd>", "Daily budget cap in USD (per repo)")
   .option("--seed <n>", "Number of initial brainstorm tasks to generate", "5")
   .option("-d, --dir <paths>", "Comma-separated directories/repos to work on (default: cwd)")
   .option("--dry-run", "Brainstorm tasks but don't start agents")
@@ -71,23 +71,28 @@ export const yoloCommand = new Command("yolo")
     // Multi-repo: fork a child process per repo (each gets its own DB singleton)
     if (targetDirs.length > 1) {
       console.log(YOLO_BANNER);
-      console.log(chalk.bold(`  Burning ${targetDirs.length} repositories in parallel:\n`));
+      const totalWorkers = parseInt(opts.workers as string, 10) || 1;
+      // Distribute workers: 1 per repo, extras go to first repos
+      const workersPerRepo = Math.max(1, Math.floor(totalWorkers / targetDirs.length));
+      // Only run as many repos in parallel as we have workers
+      const maxParallel = Math.min(targetDirs.length, totalWorkers);
+
+      console.log(chalk.bold(`  Burning ${targetDirs.length} repos (${totalWorkers} total agents, ${maxParallel} parallel, ${workersPerRepo}/repo):\n`));
       for (const dir of targetDirs) {
         console.log(chalk.dim(`    ${path.basename(dir).padEnd(25)} ${dir}`));
       }
       console.log();
 
-      // Fork a child process for each repo
       const cliEntry = path.resolve(
         path.dirname(fileURLToPath(import.meta.url)),
         "..",
         "index.js"
       );
 
-      const children = targetDirs.map((dir) => {
+      function spawnRepo(dir: string) {
         const args = ["yolo"];
         if (focus) args.push(focus);
-        args.push("--workers", opts.workers as string ?? "1");
+        args.push("--workers", String(workersPerRepo));
         if (opts.budget) args.push("--budget", opts.budget as string);
         if (opts.seed) args.push("--seed", opts.seed as string);
         if (opts.dryRun) args.push("--dry-run");
@@ -112,32 +117,41 @@ export const yoloCommand = new Command("yolo")
           }
         });
 
-        return { dir, child, name: path.basename(dir) };
-      });
+        return child;
+      }
 
-      // Handle Ctrl+C — kill all children
+      const activeChildren = new Set<ReturnType<typeof fork>>();
+
       const cleanup = () => {
-        for (const { child } of children) {
+        for (const child of activeChildren) {
           child.kill("SIGTERM");
         }
       };
       process.on("SIGINT", cleanup);
       process.on("SIGTERM", cleanup);
 
-      // Wait for all children to finish
-      await Promise.all(
-        children.map(
-          ({ child, name }) =>
-            new Promise<void>((resolve) => {
-              child.on("close", (code) => {
-                console.log(
-                  `  ${chalk.cyan(`[${name}]`)} ${code === 0 ? chalk.green("done") : chalk.red(`exited ${code}`)}`
-                );
-                resolve();
-              });
-            })
-        )
-      );
+      // Process repos in batches of maxParallel
+      const queue = [...targetDirs];
+      while (queue.length > 0) {
+        const batch = queue.splice(0, maxParallel);
+        const batchPromises = batch.map((dir) => {
+          const child = spawnRepo(dir);
+          activeChildren.add(child);
+
+          return new Promise<void>((resolve) => {
+            child.on("close", (code) => {
+              activeChildren.delete(child);
+              const name = path.basename(dir);
+              console.log(
+                `  ${chalk.cyan(`[${name}]`)} ${code === 0 ? chalk.green("done") : chalk.red(`exited ${code}`)}`
+              );
+              resolve();
+            });
+          });
+        });
+
+        await Promise.all(batchPromises);
+      }
 
       process.off("SIGINT", cleanup);
       process.off("SIGTERM", cleanup);

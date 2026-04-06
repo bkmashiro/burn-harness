@@ -295,8 +295,8 @@ Output ONLY a JSON object:
     const genResult = await monitorProcess(
       genProc.process,
       (event: any) => {
-        if (event.message) genOutput += event.message;
-        if (event.result) genOutput += event.result;
+        if (event.type === "progress" && event.message) genOutput += event.message;
+        if (event.type === "completion" && event.result) genOutput += event.result;
       },
       undefined,
       120_000
@@ -304,17 +304,32 @@ Output ONLY a JSON object:
     for (const event of genResult.events) {
       if (event.type === "completion" && event.result) genOutput += event.result;
     }
+    console.log(chalk.dim(`    [gen] output: ${genOutput.length} chars, preview: ${genOutput.slice(0, 200)}`));
+
+    if (!genOutput.trim()) {
+      // Fallback: check rawOutput
+      if (genResult.rawOutput) {
+        // Try to extract result from raw stream-json
+        const resultMatch = genResult.rawOutput.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if (resultMatch) {
+          genOutput = JSON.parse(`"${resultMatch[1]}"`);
+        }
+      }
+      console.error(chalk.dim(`    [debug] genOutput empty, rawOutput: ${genResult.rawOutput.length} chars, events: ${genResult.events.length}`));
+    }
 
     try {
-      const match = genOutput.match(/\{[\s\S]*"name"[\s\S]*"description"[\s\S]*\}/);
-      if (match) {
-        const idea = JSON.parse(match[0]);
-        currentIdea = `${idea.name}: ${idea.description}`;
-        console.log(chalk.dim(`    → ${idea.name}: ${idea.description.slice(0, 80)}...`));
+      // Extract JSON — try code block first, then find any {..."name":...}
+      const idea = extractJson(genOutput, ["name", "description"]);
+      if (idea) {
+        const name = String(idea.name);
+        const desc = String(idea.description);
+        currentIdea = `${name}: ${desc}`;
+        console.log(chalk.dim(`    → ${name}: ${desc.slice(0, 80)}...`));
 
         // Last round — skip critic
         if (round === rounds - 1) {
-          return { name: idea.name, description: idea.description };
+          return { name, description: desc };
         }
       }
     } catch {
@@ -354,10 +369,9 @@ Rate 1-10 and give specific criticism. Output ONLY:
     }
 
     try {
-      const match = criticOutput.match(/\{[\s\S]*"score"[\s\S]*\}/);
-      if (match) {
-        const critique = JSON.parse(match[0]);
-        console.log(chalk.dim(`    Critic: ${critique.score}/10 — ${(critique.criticism as string).slice(0, 80)}`));
+      const critique = extractJson(criticOutput, ["score"]) as any;
+      if (critique) {
+        console.log(chalk.dim(`    Critic: ${critique.score}/10 — ${(critique.criticism ?? "").slice(0, 80)}`));
 
         // If score is high enough, accept it
         if (critique.score >= 8) {
@@ -381,7 +395,36 @@ Rate 1-10 and give specific criticism. Output ONLY:
   console.log(chalk.yellow("  Could not generate a project idea."));
   return null;
 
+  } catch (err) {
+    console.log(chalk.red(`  Brainstorm error: ${err instanceof Error ? err.message : err}`));
+    if (err instanceof Error && err.stack) {
+      console.log(chalk.dim(`  ${err.stack.split("\n").slice(1, 3).join("\n  ")}`));
+    }
+    return null;
   } finally {
     cleanup();
   }
+}
+
+/** Extract a JSON object from text that contains the required keys */
+function extractJson(text: string, requiredKeys: string[]): Record<string, unknown> | null {
+  // Try code block first
+  const codeBlock = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (codeBlock) {
+    try {
+      const parsed = JSON.parse(codeBlock[1]);
+      if (requiredKeys.every(k => k in parsed)) return parsed;
+    } catch { /* continue */ }
+  }
+
+  // Try to find JSON objects in the text
+  const candidates = text.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g) ?? [];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (requiredKeys.every(k => k in parsed)) return parsed;
+    } catch { /* continue */ }
+  }
+
+  return null;
 }

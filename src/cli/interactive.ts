@@ -52,7 +52,7 @@ ${chalk.bold("Commands:")}
   ${chalk.cyan("Agent Control")}
   ${chalk.bold("/start")} ${chalk.dim("[options]")}         Start agent loop ${chalk.dim('e.g. /start --workers 3 --profile aggressive')}
   ${chalk.bold("/stop")}                       Stop the agent loop
-  ${chalk.bold.red("/yolo")} ${chalk.dim("[focus]")}             Fire-and-forget: brainstorm + auto-approve + burn
+  ${chalk.bold.red("/yolo")} ${chalk.dim("[instructions]")}      Agent decides what to do and burns ${chalk.dim('e.g. /yolo  or  /yolo fix auth')}
   ${chalk.bold("/brainstorm")}                 AI analyzes codebase for improvements
   ${chalk.bold("/review")}                     Approve/reject brainstormed suggestions
 
@@ -210,7 +210,7 @@ async function handleInput(
         return;
 
       case "/yolo":
-        await handleYolo(argStr, state);
+        await handleYolo(argStr, state, rl);
         return;
 
       case "/review":
@@ -676,57 +676,136 @@ async function handleStart(args: string, state: InteractiveState): Promise<void>
   }
 }
 
-async function handleYolo(focus: string, state: InteractiveState): Promise<void> {
-  if (state.orchestrator) {
-    console.log(chalk.yellow("  Agent loop is already running. /stop first, then /yolo."));
+async function handleYolo(
+  userIntent: string,
+  state: InteractiveState,
+  _rl?: readline.Interface
+): Promise<void> {
+  console.log(chalk.bold.red("\n  🔥 YOLO MODE 🔥\n"));
+
+  const registry = new AdapterRegistry(state.config);
+  const adapter = await registry.selectAdapter();
+  if (!adapter) {
+    console.log(chalk.red("  No AI CLI available."));
     return;
   }
 
-  console.log(chalk.bold.red("\n  🔥 YOLO MODE 🔥"));
-  console.log(chalk.dim("  Brainstorming tasks and starting agents autonomously.\n"));
+  // Build the prompt: user intent or fully autonomous
+  const prompt = userIntent
+    ? `The user wants: "${userIntent}"
 
-  const config = { ...state.config };
-  config.brainstorm = { ...config.brainstorm };
-  config.brainstorm.enabled = true;
-  config.brainstorm.intervalMinutes = 5;
-  config.brainstorm.autoApprove = [
-    { type: "test" }, { type: "docs" }, { type: "refactor" },
-    { type: "performance" }, { type: "security" }, { type: "chore" },
-    { type: "bug" }, { type: "feature" },
-  ];
+Analyze this codebase and create 3-10 concrete tasks to fulfill this request.
+Each task should be small enough for an AI coding agent to complete in one session.
+Be specific — include file paths, what to change, and how to verify.
 
-  if (focus) {
-    config.preferences = { ...config.preferences };
-    config.preferences.style = (config.preferences.style ?? "") +
-      `\nFocus area for improvements: ${focus}`;
-    console.log(chalk.dim(`  Focus: ${focus}`));
+Output as a JSON array:
+[{"title": "Short title", "description": "Detailed instructions", "type": "bug|feature|refactor|test|docs|performance|security|chore", "priority": 1, "estimatedComplexity": "trivial|small|medium|large"}]`
+
+    : `Analyze this codebase and decide what improvements to make.
+You have full autonomy. Look at the code, find what needs work, and create 5-10 tasks.
+Consider: test coverage, code quality, documentation, security, performance, error handling.
+Prioritize by impact.
+
+Output as a JSON array:
+[{"title": "Short title", "description": "Detailed instructions", "type": "bug|feature|refactor|test|docs|performance|security|chore", "priority": 1, "estimatedComplexity": "trivial|small|medium|large"}]
+
+Be specific — include file paths and concrete instructions.`;
+
+  if (userIntent) {
+    console.log(chalk.dim(`  Intent: ${userIntent}`));
+  } else {
+    console.log(chalk.dim("  No instructions — agent decides what to do."));
   }
+  console.log(chalk.dim(`  CLI: ${adapter.name}\n`));
 
-  // Seed queue if empty
-  const stats = getQueueStats();
-  if (stats.pending === 0) {
-    console.log(chalk.cyan("  Seeding queue with brainstormed tasks...\n"));
-    await handleBrainstorm({ ...state, config });
-  }
-
-  // Start agents
-  console.log(chalk.dim("  Starting agent loop..."));
-  state.orchestrator = new Orchestrator(state.projectRoot, config);
-  state.orchestrator.start().catch((err) => {
-    console.log(chalk.red(`\n  Agent loop error: ${err.message}`));
-    state.orchestrator = null;
+  process.stdout.write(chalk.dim("  Planning"));
+  const cliProcess = adapter.execute({
+    prompt,
+    cwd: state.projectRoot,
+    model: state.config.cli.claude?.model ?? "sonnet",
+    budgetUsd: state.config.safety.maxBudgetPerTaskUsd ?? undefined,
   });
 
-  await sleep(1500);
+  let output = "";
+  const result = await monitorProcess(
+    cliProcess.process,
+    (event) => {
+      if (event.type === "progress") process.stdout.write(chalk.dim("."));
+      if (event.message) output += event.message;
+      if (event.result) output += event.result;
+    },
+    undefined,
+    300_000
+  );
+  for (const event of result.events) {
+    if (event.type === "completion" && event.result) output += event.result;
+  }
+  console.log("\n");
 
-  const registry = new AdapterRegistry(config);
-  const adapter = await registry.selectAdapter();
-  if (adapter) {
-    console.log(chalk.green("  + ") + `Agents are burning with ${chalk.bold(adapter.name)}. Use /stop to halt.\n`);
+  // Parse tasks
+  let tasks: Array<{
+    title: string;
+    description: string;
+    type: string;
+    priority?: number;
+    estimatedComplexity?: string;
+  }> = [];
+
+  try {
+    const jsonMatch = output.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (Array.isArray(parsed)) {
+        tasks = parsed.filter((t: any) => t.title && t.description);
+      }
+    }
+  } catch { /* ignore */ }
+
+  if (tasks.length === 0) {
+    console.log(chalk.yellow("  Couldn't generate tasks. Try /yolo with more specific instructions.\n"));
+    return;
+  }
+
+  // Auto-queue all tasks
+  console.log(chalk.bold(`  ${tasks.length} tasks:\n`));
+  for (const t of tasks) {
+    addTask({
+      title: t.title.slice(0, 100),
+      description: t.description,
+      type: t.type ?? "chore",
+      priority: t.priority ?? 3,
+      estimatedComplexity: t.estimatedComplexity ?? "medium",
+      source: "brainstorm",
+    });
+    console.log(
+      chalk.green("  + ") +
+        chalk.dim(`[${t.type ?? "chore"}/P${t.priority ?? 3}]`) +
+        ` ${t.title.slice(0, 60)}`
+    );
+  }
+
+  // Auto-start if not running
+  if (!state.orchestrator) {
+    const config = { ...state.config };
+    config.brainstorm = { ...config.brainstorm };
+    config.brainstorm.enabled = true;
+    config.brainstorm.intervalMinutes = 5;
+    config.brainstorm.autoApprove = [
+      { type: "test" }, { type: "docs" }, { type: "refactor" },
+      { type: "performance" }, { type: "security" }, { type: "chore" },
+      { type: "bug" }, { type: "feature" },
+    ];
+
+    state.orchestrator = new Orchestrator(state.projectRoot, config);
+    state.orchestrator.start().catch((err) => {
+      console.log(chalk.red(`\n  Agent loop error: ${err.message}`));
+      state.orchestrator = null;
+    });
+
+    await sleep(1500);
+    console.log(chalk.bold.red(`\n  Burning. ${tasks.length} tasks queued. /stop to halt.\n`));
   } else {
-    console.log(chalk.red("  No AI CLI available."));
-    state.orchestrator?.stop();
-    state.orchestrator = null;
+    console.log(chalk.dim(`\n  ${tasks.length} tasks added to running queue.\n`));
   }
 }
 

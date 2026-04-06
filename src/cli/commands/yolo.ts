@@ -6,6 +6,7 @@ import { fork, execSync as execSyncFn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getDb } from "../../db/client.js";
 import { loadConfig } from "../../config/loader.js";
+import { registerInstance, unregisterInstance } from "./ps.js";
 import { addTask, getQueueStats } from "../../core/task-queue.js";
 import { Orchestrator } from "../../core/orchestrator.js";
 import { AdapterRegistry } from "../../adapters/registry.js";
@@ -489,10 +490,22 @@ async function runYoloOnRepo(
     return;
   }
 
+  // Default session timeout: 4 hours unless configured otherwise
+  if (!config.safety.maxRuntimePerSessionHours) {
+    config.safety.maxRuntimePerSessionHours = 4;
+    console.log(chalk.dim("  Auto-stop: 4 hours (set maxRuntimePerSessionHours to override)"));
+  }
+
   console.log(chalk.bold.red("  Agents are burning. Ctrl+C to stop.\n"));
+
+  // Register globally so `burn ps` and `burn stop-all` can find us
+  registerInstance(projectRoot, `yolo ${focus ?? ""}`);
+  process.on("exit", unregisterInstance);
 
   const orchestrator = new Orchestrator(projectRoot, config);
   await orchestrator.start();
+
+  unregisterInstance();
 }
 
 async function brainstormSeed(

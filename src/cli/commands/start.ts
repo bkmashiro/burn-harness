@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { loadConfig } from "../../config/loader.js";
 import { Orchestrator } from "../../core/orchestrator.js";
+import { registerInstance, unregisterInstance } from "./ps.js";
 import chalk from "chalk";
 
 export const startCommand = new Command("start")
@@ -23,16 +24,30 @@ export const startCommand = new Command("start")
       config.brainstorm.enabled = false;
     }
 
+    // Default session timeout: 4 hours
+    if (!config.safety.maxRuntimePerSessionHours) {
+      config.safety.maxRuntimePerSessionHours = 4;
+    }
+
+    const budgetInfo = config.safety.maxBudgetPerDayUsd != null
+      ? `$${config.safety.maxBudgetPerDayUsd}/day`
+      : "no cap";
+
     console.log(
-      chalk.bold("🔥 burn-harness") + chalk.dim(" — AI coding agent loop")
+      chalk.bold("burn-harness") + chalk.dim(" — AI coding agent loop")
     );
     console.log(
       chalk.dim(
-        `  Workers: ${config.execution.maxConcurrentAgents} | CLIs: ${config.cli.preference.join(", ")} | Budget: $${config.safety.maxBudgetPerDayUsd}/day`
+        `  Workers: ${config.execution.maxConcurrentAgents} | CLIs: ${config.cli.preference.join(", ")} | Budget: ${budgetInfo} | Auto-stop: ${config.safety.maxRuntimePerSessionHours}h`
       )
     );
     console.log();
 
+    registerInstance(projectRoot, `start${opts.profile ? ` --profile ${opts.profile}` : ""}`);
+    process.on("exit", unregisterInstance);
+
     const orchestrator = new Orchestrator(projectRoot, config, opts.profile as string);
     await orchestrator.start();
+
+    unregisterInstance();
   });

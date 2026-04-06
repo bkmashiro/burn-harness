@@ -18,37 +18,52 @@ const BRAINSTORM_CATEGORIES = [
   {
     name: "tests",
     prompt:
-      "Find functions, modules, or code paths that lack test coverage. Suggest specific test cases to add.",
+      "Find functions, modules, or code paths that lack test coverage. Suggest specific test cases including edge cases, error paths, and boundary conditions.",
   },
   {
     name: "docs",
     prompt:
-      "Find exported functions/classes missing documentation, outdated README sections, or undocumented APIs.",
+      "Find exported functions/classes missing documentation, outdated README sections, or undocumented APIs. Also look for misleading comments that don't match the code.",
   },
   {
     name: "security",
     prompt:
-      "Find potential security issues: hardcoded secrets, injection risks, missing input validation, outdated deps with known CVEs.",
+      "Find potential security issues: hardcoded secrets, injection risks (SQL, command, path traversal), missing input validation, unsafe deserialization, timing attacks, outdated deps with known CVEs.",
   },
   {
     name: "performance",
     prompt:
-      "Find performance bottlenecks: N+1 queries, unnecessary re-renders, missing memoization, large bundle imports, missing indexes.",
+      "Find performance bottlenecks: N+1 queries, unnecessary re-renders, missing memoization, large bundle imports, missing indexes, synchronous I/O in hot paths, memory leaks.",
   },
   {
     name: "code-quality",
     prompt:
-      "Find code smells: long functions (>50 lines), duplicated code, high cyclomatic complexity, dead code, inconsistent naming.",
+      "Find code smells: long functions (>50 lines), duplicated code, high cyclomatic complexity, dead code, inconsistent naming, god objects, feature envy.",
   },
   {
     name: "error-handling",
     prompt:
-      "Find missing error handling: unhandled promise rejections, bare catch blocks, missing error boundaries, missing retry logic.",
+      "Find missing error handling: unhandled promise rejections, bare catch blocks, missing error boundaries, missing retry logic, swallowed errors, missing finally blocks for cleanup.",
   },
   {
     name: "type-safety",
     prompt:
-      'Find type safety issues: `any` types, missing null checks, unsafe type assertions, implicit `any` parameters.',
+      'Find type safety issues: `any` types, missing null checks, unsafe type assertions, implicit `any` parameters, missing return types on public APIs.',
+  },
+  {
+    name: "reliability",
+    prompt:
+      "Find reliability issues: race conditions, missing locks, unhandled edge cases in parsing, missing timeouts on network calls, missing graceful shutdown, resource leaks (file handles, connections, listeners).",
+  },
+  {
+    name: "ux",
+    prompt:
+      "Find user experience issues: misleading error messages, missing progress indicators, silent failures, confusing CLI flags, missing --help text, inconsistent output formats.",
+  },
+  {
+    name: "architecture",
+    prompt:
+      "Find architectural issues: circular dependencies, god modules that do too much, missing abstractions, tight coupling between modules, config scattered across files, missing dependency injection.",
   },
 ];
 
@@ -84,7 +99,7 @@ export class BrainstormGenerator {
     this.lastCategory = (this.lastCategory + 1) % categories.length;
     const category = categories[this.lastCategory];
 
-    const prompt = buildBrainstormPrompt(
+    const prompt = this.buildPrompt(
       category,
       this.config.brainstorm.ignoreAreas,
       this.config.brainstorm.maxSuggestionsPerRun
@@ -250,6 +265,54 @@ export class BrainstormGenerator {
     });
   }
 
+  private buildPrompt(
+    category: { name: string; prompt: string },
+    ignoreAreas: string[],
+    maxSuggestions: number
+  ): string {
+    const userPrefs = loadUserPreferences();
+    const prefsContext = mergePreferencesIntoPrompt(userPrefs);
+    const prefsSection = prefsContext
+      ? `\n## User Preferences\n${prefsContext}\nSuggestions should align with these preferences.\n`
+      : "";
+
+    // Gather what's already been done/attempted — tell Claude so it suggests NEW things
+    const db = getDb();
+    const doneTasks = db
+      .prepare("SELECT title, type FROM tasks WHERE status IN ('done', 'reviewing', 'executing', 'pending') ORDER BY created_at DESC LIMIT 30")
+      .all() as { title: string; type: string }[];
+
+    const alreadyDoneSection = doneTasks.length > 0
+      ? `\n## Already Done or In Progress (DO NOT suggest these again)\n${doneTasks.map(t => `- [${t.type}] ${t.title}`).join("\n")}\n\nSuggest DIFFERENT improvements that are NOT in the list above.\n`
+      : "";
+
+    return `You are analyzing this codebase to suggest improvements.
+Do NOT make any changes. Only analyze and suggest.
+
+## Focus Area: ${category.name}
+${category.prompt}
+${prefsSection}${alreadyDoneSection}
+## Ignore
+${ignoreAreas.map((a) => `- ${a}`).join("\n")}
+
+## Output Format
+Respond with a JSON array of suggestions (max ${maxSuggestions}):
+\`\`\`json
+[
+  {
+    "title": "Short descriptive title",
+    "description": "Detailed description of what to do and why",
+    "type": "test|docs|security|performance|refactor|bug|chore",
+    "priority": 3,
+    "estimatedComplexity": "trivial|small|medium|large",
+    "targetFiles": ["path/to/file.ts"]
+  }
+]
+\`\`\`
+
+Be specific and actionable. Each suggestion should be a standalone task that an AI coding agent can execute. Look DEEPER than surface-level issues — find subtle bugs, architectural problems, and non-obvious improvements.`;
+  }
+
   private recordSuggestion(
     suggestion: BrainstormSuggestion,
     category: string
@@ -264,45 +327,6 @@ export class BrainstormGenerator {
       category
     );
   }
-}
-
-function buildBrainstormPrompt(
-  category: { name: string; prompt: string },
-  ignoreAreas: string[],
-  maxSuggestions: number
-): string {
-  // Include global user preferences in brainstorm context
-  const userPrefs = loadUserPreferences();
-  const prefsContext = mergePreferencesIntoPrompt(userPrefs);
-  const prefsSection = prefsContext
-    ? `\n## User Preferences\n${prefsContext}\nSuggestions should align with these preferences.\n`
-    : "";
-
-  return `You are analyzing this codebase to suggest improvements.
-Do NOT make any changes. Only analyze and suggest.
-
-## Focus Area: ${category.name}
-${category.prompt}
-${prefsSection}
-## Ignore
-${ignoreAreas.map((a) => `- ${a}`).join("\n")}
-
-## Output Format
-Respond with a JSON array of suggestions (max ${maxSuggestions}):
-\`\`\`json
-[
-  {
-    "title": "Short descriptive title",
-    "description": "Detailed description of what to do and why",
-    "type": "test|docs|security|performance|refactor|chore",
-    "priority": 3,
-    "estimatedComplexity": "trivial|small|medium|large",
-    "targetFiles": ["path/to/file.ts"]
-  }
-]
-\`\`\`
-
-Be specific and actionable. Each suggestion should be a standalone task that an AI coding agent can execute.`;
 }
 
 function parseSuggestions(output: string): BrainstormSuggestion[] {

@@ -18,16 +18,36 @@ export function parseClaudeStreamJson(line: string): OutputEvent | null {
     const event = JSON.parse(line);
 
     // Claude stream-json event types
-    if (event.type === "assistant" && event.message) {
+
+    // System init event — extract session_id
+    if (event.type === "system" && event.session_id) {
       return {
         type: "progress",
-        message:
-          typeof event.message === "string"
-            ? event.message
-            : JSON.stringify(event.message),
+        message: "",
+        raw: line,
       };
     }
 
+    // Assistant message — contains content blocks with text
+    if (event.type === "assistant" && event.message) {
+      const msg = event.message;
+      // Extract text from content blocks: [{type: "text", text: "..."}]
+      if (msg.content && Array.isArray(msg.content)) {
+        const texts = msg.content
+          .filter((b: any) => b.type === "text" && b.text)
+          .map((b: any) => b.text);
+        if (texts.length > 0) {
+          return { type: "progress", message: texts.join("") };
+        }
+      }
+      // Fallback: stringify the whole message
+      return {
+        type: "progress",
+        message: typeof msg === "string" ? msg : "",
+      };
+    }
+
+    // Content block deltas (streaming)
     if (event.type === "content_block_delta") {
       const delta = event.delta;
       if (delta?.type === "text_delta") {
@@ -35,6 +55,7 @@ export function parseClaudeStreamJson(line: string): OutputEvent | null {
       }
     }
 
+    // Tool use events
     if (event.type === "tool_use" || event.tool_name) {
       return {
         type: "tool_use",
@@ -46,6 +67,7 @@ export function parseClaudeStreamJson(line: string): OutputEvent | null {
       };
     }
 
+    // Result event — final response with cost/token data
     if (event.type === "result") {
       return {
         type: "completion",
@@ -58,6 +80,21 @@ export function parseClaudeStreamJson(line: string): OutputEvent | null {
         costUsd: event.cost_usd ?? event.total_cost_usd,
         raw: line,
       };
+    }
+
+    // Rate limit event from Claude
+    if (event.type === "rate_limit_event") {
+      const info = event.rate_limit_info;
+      if (info?.status === "rate_limited" || info?.status === "denied") {
+        return {
+          type: "rate_limit",
+          message: `Rate limited (${info.rateLimitType}), resets at ${info.resetsAt}`,
+          retryable: true,
+          retryAfterMs: info.resetsAt ? (info.resetsAt * 1000 - Date.now()) : undefined,
+        };
+      }
+      // status === "allowed" — not rate limited, ignore
+      return null;
     }
 
     if (event.type === "error") {

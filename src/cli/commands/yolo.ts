@@ -259,6 +259,7 @@ Be specific and actionable. Include file paths where possible.`;
   console.log("\n");
 
   try {
+    // Try to find a JSON array in the output
     const jsonMatch = output.match(/\[[\s\S]*\]/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
@@ -269,8 +270,22 @@ Be specific and actionable. Include file paths where possible.`;
       }
     }
   } catch {
-    // Parse failure
+    // JSON parse failed — try to extract from markdown code blocks
+    try {
+      const codeBlockMatch = output.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+      if (codeBlockMatch) {
+        const parsed = JSON.parse(codeBlockMatch[1]);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .filter((t: any) => t.title && t.description)
+            .slice(0, count);
+        }
+      }
+    } catch {
+      // Still failed
+    }
   }
+
 
   return [];
 }

@@ -28,9 +28,31 @@ execution:
   maxAttemptsPerTask: 3
 
 safety:
-  maxBudgetPerTaskUsd: 5.00
-  maxBudgetPerDayUsd: 50.00
-  maxBudgetTotalUsd: 500.00
+  # All budget limits are OPTIONAL. If not set, burn runs with no caps.
+  # Uncomment any limits you want to enforce:
+
+  # USD limits
+  # maxBudgetPerTaskUsd: 5.00    # Per-task spending cap
+  # maxBudgetPerDayUsd: 50.00    # Daily aggregate cap
+  # maxBudgetTotalUsd: 500.00    # Lifetime cap
+
+  # Token limits
+  # maxTokensPerTask: 100000     # Max tokens per task
+  # maxTokensPerDay: 1000000     # Max tokens per day
+  # maxTokensTotal: 10000000     # Lifetime token cap
+
+  # Time limits
+  # maxRuntimePerTaskMinutes: 30      # Max wall-clock per task
+  # maxRuntimePerDayMinutes: 480      # Max agent runtime per day (8h)
+  # maxRuntimePerSessionHours: 12     # Max single session length
+
+  # Budget allocation by task type (% of daily budget)
+  # budgetAllocation:
+  #   feature: 40
+  #   bug: 30
+  #   test: 15
+  #   brainstorm: 15
+
   maxFilesModifiedPerTask: 20
   forbiddenPaths:
     - "*.env*"

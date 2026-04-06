@@ -9,6 +9,9 @@ import {
   getQueueStats,
   getDailyCost,
   getTotalCost,
+  getDailyTokens,
+  getTotalTokens,
+  getDailyCostByType,
   type Task,
   type AddTaskInput,
 } from "../core/task-queue.js";
@@ -37,6 +40,7 @@ ${chalk.bold("Commands:")}
   ${chalk.bold("/cancel")} ${chalk.dim("<id>")}              Cancel a task
   ${chalk.bold("/rollback")} ${chalk.dim("<id>")}            Undo a task's changes
   ${chalk.bold("/report")}                     Cost and usage report
+  ${chalk.bold("/budget")}                     Show budget limits and usage
 
   ${chalk.cyan("Agent Control")}
   ${chalk.bold("/start")}                      Start the agent loop
@@ -206,6 +210,10 @@ async function handleInput(
         handleReport();
         return;
 
+      case "/budget":
+        handleBudget(state);
+        return;
+
       case "/config":
         handleConfig(state);
         return;
@@ -351,8 +359,32 @@ function handleStatus(state: InteractiveState): void {
   console.log();
 
   // Costs
-  console.log(`  Today's cost: ${chalk.bold("$" + dailyCost.toFixed(2))} / $${state.config.safety.maxBudgetPerDayUsd}`);
-  console.log(`  Total cost:   ${chalk.bold("$" + totalCost.toFixed(2))} / $${state.config.safety.maxBudgetTotalUsd}`);
+  const s = state.config.safety;
+  const dailyLimit = s.maxBudgetPerDayUsd != null ? ` / $${s.maxBudgetPerDayUsd}` : "";
+  const totalLimit = s.maxBudgetTotalUsd != null ? ` / $${s.maxBudgetTotalUsd}` : "";
+  console.log(`  Today's cost: ${chalk.bold("$" + dailyCost.toFixed(2))}${dailyLimit}`);
+  console.log(`  Total cost:   ${chalk.bold("$" + totalCost.toFixed(2))}${totalLimit}`);
+
+  // Token usage
+  const dailyTokens = getDailyTokens();
+  const totalTokens = getTotalTokens();
+  const dailyTokenLimit = s.maxTokensPerDay != null ? ` / ${s.maxTokensPerDay.toLocaleString()}` : "";
+  const totalTokenLimit = s.maxTokensTotal != null ? ` / ${s.maxTokensTotal.toLocaleString()}` : "";
+  if (dailyTokens > 0 || s.maxTokensPerDay != null) {
+    console.log(`  Tokens today: ${dailyTokens.toLocaleString()}${dailyTokenLimit}`);
+  }
+  if (totalTokens > 0 || s.maxTokensTotal != null) {
+    console.log(`  Tokens total: ${totalTokens.toLocaleString()}${totalTokenLimit}`);
+  }
+
+  // Budget mode
+  const hasAnyLimit = s.maxBudgetPerDayUsd != null || s.maxBudgetTotalUsd != null ||
+    s.maxTokensPerDay != null || s.maxTokensTotal != null ||
+    s.maxRuntimePerDayMinutes != null || s.maxRuntimePerSessionHours != null;
+  if (!hasAnyLimit) {
+    console.log(chalk.dim("\n  No budget limits set — running with no caps."));
+  }
+
   console.log();
 }
 
@@ -968,16 +1000,146 @@ function handleReport(): void {
   }
 }
 
+function handleBudget(state: InteractiveState): void {
+  const s = state.config.safety;
+  const dailyCost = getDailyCost();
+  const totalCost = getTotalCost();
+  const dailyTokens = getDailyTokens();
+  const totalTokens = getTotalTokens();
+
+  console.log(chalk.bold("\n  Budget Dashboard\n"));
+
+  const hasAnyLimit = s.maxBudgetPerTaskUsd != null || s.maxBudgetPerDayUsd != null ||
+    s.maxBudgetTotalUsd != null || s.maxTokensPerTask != null ||
+    s.maxTokensPerDay != null || s.maxTokensTotal != null ||
+    s.maxRuntimePerTaskMinutes != null || s.maxRuntimePerDayMinutes != null ||
+    s.maxRuntimePerSessionHours != null;
+
+  if (!hasAnyLimit) {
+    console.log(chalk.green("  No budget limits configured — running with no caps."));
+    console.log(chalk.dim("  Set limits in burn.yaml under safety: to control spending.\n"));
+    console.log(`  Spent today:  $${dailyCost.toFixed(2)}  (${dailyTokens.toLocaleString()} tokens)`);
+    console.log(`  Spent total:  $${totalCost.toFixed(2)}  (${totalTokens.toLocaleString()} tokens)`);
+    console.log();
+    return;
+  }
+
+  // USD limits
+  if (s.maxBudgetPerTaskUsd != null || s.maxBudgetPerDayUsd != null || s.maxBudgetTotalUsd != null) {
+    console.log(chalk.cyan("  USD Budget"));
+    if (s.maxBudgetPerTaskUsd != null) {
+      console.log(`  Per-task cap:   $${s.maxBudgetPerTaskUsd}`);
+    }
+    if (s.maxBudgetPerDayUsd != null) {
+      const pct = Math.min(100, (dailyCost / s.maxBudgetPerDayUsd) * 100);
+      const bar = makeBar(pct);
+      console.log(`  Daily:          $${dailyCost.toFixed(2)} / $${s.maxBudgetPerDayUsd}  ${bar} ${pct.toFixed(0)}%`);
+    }
+    if (s.maxBudgetTotalUsd != null) {
+      const pct = Math.min(100, (totalCost / s.maxBudgetTotalUsd) * 100);
+      const bar = makeBar(pct);
+      console.log(`  Total:          $${totalCost.toFixed(2)} / $${s.maxBudgetTotalUsd}  ${bar} ${pct.toFixed(0)}%`);
+    }
+    console.log();
+  }
+
+  // Token limits
+  if (s.maxTokensPerTask != null || s.maxTokensPerDay != null || s.maxTokensTotal != null) {
+    console.log(chalk.cyan("  Token Budget"));
+    if (s.maxTokensPerTask != null) {
+      console.log(`  Per-task cap:   ${s.maxTokensPerTask.toLocaleString()}`);
+    }
+    if (s.maxTokensPerDay != null) {
+      const pct = Math.min(100, (dailyTokens / s.maxTokensPerDay) * 100);
+      const bar = makeBar(pct);
+      console.log(`  Daily:          ${dailyTokens.toLocaleString()} / ${s.maxTokensPerDay.toLocaleString()}  ${bar} ${pct.toFixed(0)}%`);
+    }
+    if (s.maxTokensTotal != null) {
+      const pct = Math.min(100, (totalTokens / s.maxTokensTotal) * 100);
+      const bar = makeBar(pct);
+      console.log(`  Total:          ${totalTokens.toLocaleString()} / ${s.maxTokensTotal.toLocaleString()}  ${bar} ${pct.toFixed(0)}%`);
+    }
+    console.log();
+  }
+
+  // Time limits
+  if (s.maxRuntimePerTaskMinutes != null || s.maxRuntimePerDayMinutes != null || s.maxRuntimePerSessionHours != null) {
+    console.log(chalk.cyan("  Time Budget"));
+    if (s.maxRuntimePerTaskMinutes != null) console.log(`  Per-task max:   ${s.maxRuntimePerTaskMinutes}m`);
+    if (s.maxRuntimePerDayMinutes != null) console.log(`  Daily max:      ${s.maxRuntimePerDayMinutes}m`);
+    if (s.maxRuntimePerSessionHours != null) console.log(`  Session max:    ${s.maxRuntimePerSessionHours}h`);
+    console.log();
+  }
+
+  // Budget allocation
+  if (s.budgetAllocation && s.maxBudgetPerDayUsd != null) {
+    console.log(chalk.cyan("  Type Allocation (% of daily USD budget)"));
+    for (const [type, pct] of Object.entries(s.budgetAllocation)) {
+      if (pct == null) continue;
+      const typeLimit = (pct / 100) * s.maxBudgetPerDayUsd;
+      const typeSpent = getDailyCostByType(type);
+      const usedPct = Math.min(100, (typeSpent / typeLimit) * 100);
+      const bar = makeBar(usedPct);
+      console.log(`  ${type.padEnd(14)} ${String(pct).padStart(3)}%  $${typeSpent.toFixed(2)} / $${typeLimit.toFixed(2)}  ${bar}`);
+    }
+    console.log();
+  }
+
+  console.log(chalk.dim("  Note: CLIs that don't report tokens/cost use runtime estimation."));
+  console.log();
+}
+
+function makeBar(pct: number): string {
+  const width = 20;
+  const filled = Math.round((pct / 100) * width);
+  const empty = width - filled;
+  const color = pct >= 90 ? chalk.red : pct >= 70 ? chalk.yellow : chalk.green;
+  return color("[" + "=".repeat(filled) + " ".repeat(empty) + "]");
+}
+
 function handleConfig(state: InteractiveState): void {
+  const s = state.config.safety;
   console.log(chalk.bold("\n  Current Configuration\n"));
-  console.log(`  CLI preference: ${chalk.cyan(state.config.cli.preference.join(", "))}`);
+
+  console.log(chalk.cyan("  Execution"));
+  console.log(`  CLI preference: ${state.config.cli.preference.join(", ")}`);
   console.log(`  Base branch:    ${state.config.git.baseBranch}`);
   console.log(`  Max workers:    ${state.config.execution.maxConcurrentAgents}`);
   console.log(`  Task timeout:   ${state.config.execution.taskTimeoutMinutes}m`);
-  console.log(`  Budget/task:    $${state.config.safety.maxBudgetPerTaskUsd}`);
-  console.log(`  Budget/day:     $${state.config.safety.maxBudgetPerDayUsd}`);
-  console.log(`  Budget total:   $${state.config.safety.maxBudgetTotalUsd}`);
-  console.log(`  Brainstorm:     ${state.config.brainstorm.enabled ? chalk.green("enabled") : chalk.yellow("disabled")}`);
+  console.log();
+
+  console.log(chalk.cyan("  Budget Limits"));
+  const hasAnyLimit = s.maxBudgetPerTaskUsd != null || s.maxBudgetPerDayUsd != null ||
+    s.maxBudgetTotalUsd != null || s.maxTokensPerTask != null ||
+    s.maxTokensPerDay != null || s.maxTokensTotal != null ||
+    s.maxRuntimePerTaskMinutes != null || s.maxRuntimePerDayMinutes != null ||
+    s.maxRuntimePerSessionHours != null;
+
+  if (!hasAnyLimit) {
+    console.log(chalk.dim("  No budget limits — running with no caps."));
+  } else {
+    if (s.maxBudgetPerTaskUsd != null) console.log(`  USD/task:       $${s.maxBudgetPerTaskUsd}`);
+    if (s.maxBudgetPerDayUsd != null) console.log(`  USD/day:        $${s.maxBudgetPerDayUsd}`);
+    if (s.maxBudgetTotalUsd != null) console.log(`  USD total:      $${s.maxBudgetTotalUsd}`);
+    if (s.maxTokensPerTask != null) console.log(`  Tokens/task:    ${s.maxTokensPerTask.toLocaleString()}`);
+    if (s.maxTokensPerDay != null) console.log(`  Tokens/day:     ${s.maxTokensPerDay.toLocaleString()}`);
+    if (s.maxTokensTotal != null) console.log(`  Tokens total:   ${s.maxTokensTotal.toLocaleString()}`);
+    if (s.maxRuntimePerTaskMinutes != null) console.log(`  Runtime/task:   ${s.maxRuntimePerTaskMinutes}m`);
+    if (s.maxRuntimePerDayMinutes != null) console.log(`  Runtime/day:    ${s.maxRuntimePerDayMinutes}m`);
+    if (s.maxRuntimePerSessionHours != null) console.log(`  Session max:    ${s.maxRuntimePerSessionHours}h`);
+  }
+
+  if (s.budgetAllocation) {
+    console.log();
+    console.log(chalk.cyan("  Budget Allocation (% of daily)"));
+    for (const [type, pct] of Object.entries(s.budgetAllocation)) {
+      if (pct != null) console.log(`  ${type.padEnd(14)} ${pct}%`);
+    }
+  }
+
+  console.log();
+  console.log(chalk.cyan("  Brainstorm"));
+  console.log(`  Enabled:        ${state.config.brainstorm.enabled ? chalk.green("yes") : chalk.yellow("no")}`);
   console.log(`  Focus areas:    ${state.config.brainstorm.focusAreas.join(", ")}`);
   console.log();
 }

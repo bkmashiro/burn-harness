@@ -1,4 +1,5 @@
 import type { BurnConfig } from "../config/schema.js";
+import { loadUserPreferences, mergePreferencesIntoPrompt } from "../config/preferences.js";
 import type { CLIAdapter, OutputEvent } from "../adapters/types.js";
 import type { Task } from "./task-queue.js";
 import {
@@ -448,6 +449,13 @@ export class Worker {
       parts.push(
         `\nAvoid these patterns: ${this.config.preferences.forbiddenPatterns.join(", ")}`
       );
+    }
+
+    // Inject global user preferences
+    const userPrefs = loadUserPreferences();
+    const prefsPrompt = mergePreferencesIntoPrompt(userPrefs);
+    if (prefsPrompt) {
+      parts.push(`\n${prefsPrompt}`);
     }
 
     return parts.join("\n");

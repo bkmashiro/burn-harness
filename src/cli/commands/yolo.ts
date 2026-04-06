@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import fs from "node:fs";
 import path from "node:path";
-import { getDb } from "../../db/client.js";
+import { getDb, closeDb } from "../../db/client.js";
 import { loadConfig } from "../../config/loader.js";
 import { addTask, getQueueStats } from "../../core/task-queue.js";
 import { Orchestrator } from "../../core/orchestrator.js";
@@ -11,8 +11,10 @@ import { monitorProcess } from "../../monitor/output-parser.js";
 
 const YOLO_BANNER = `
 ${chalk.bold.red("  🔥 YOLO MODE 🔥")}
-${chalk.dim("  No queue. No plan. Agents brainstorm and burn autonomously.")}
-${chalk.dim("  Press Ctrl+C to stop. Everything runs on branches — main is safe.")}
+${chalk.dim("  Agents brainstorm and burn autonomously.")}
+${chalk.dim("  All changes on branches — main is never touched.")}
+${chalk.dim("  Every edit is tracked, committed, and revertible.")}
+${chalk.dim("  Ctrl+C to stop anytime.")}
 `;
 
 /**
@@ -36,132 +38,168 @@ export const yoloCommand = new Command("yolo")
   .option("--profile <name>", "Config profile to use")
   .option("--budget <usd>", "Daily budget cap in USD")
   .option("--seed <n>", "Number of initial brainstorm tasks to generate", "5")
+  .option("-d, --dir <paths>", "Comma-separated directories/repos to work on (default: cwd)")
   .option("--dry-run", "Brainstorm tasks but don't start agents")
   .action(async (focus: string | undefined, opts: Record<string, string | boolean>) => {
-    const projectRoot = process.cwd();
+    // Resolve target directories
+    const targetDirs = opts.dir
+      ? (opts.dir as string).split(",").map(d => path.resolve(d.trim()))
+      : [process.cwd()];
+
+    // Validate all directories
+    for (const dir of targetDirs) {
+      if (!fs.existsSync(dir)) {
+        console.log(chalk.red(`  Directory not found: ${dir}`));
+        process.exit(1);
+      }
+      if (!fs.statSync(dir).isDirectory()) {
+        console.log(chalk.red(`  Not a directory: ${dir}`));
+        process.exit(1);
+      }
+      try {
+        const { execSync } = await import("node:child_process");
+        execSync("git rev-parse --is-inside-work-tree", { cwd: dir, stdio: "pipe" });
+      } catch {
+        console.log(chalk.red(`  Not a git repository: ${dir}`));
+        console.log(chalk.dim("  YOLO mode only works on git repos (for safety — all changes on branches)."));
+        process.exit(1);
+      }
+    }
+
+    // For multi-repo: run sequentially on each repo
+    // For single repo: use it as project root
+    if (targetDirs.length > 1) {
+      console.log(YOLO_BANNER);
+      console.log(chalk.dim(`  Working on ${targetDirs.length} repositories:\n`));
+      for (const dir of targetDirs) {
+        console.log(chalk.dim(`    ${dir}`));
+      }
+      console.log();
+
+      for (const dir of targetDirs) {
+        console.log(chalk.bold(`\n  ═══ ${path.basename(dir)} ═══\n`));
+        closeDb(); // Reset DB singleton for each repo
+        await runYoloOnRepo(dir, focus, opts);
+      }
+      return;
+    }
+
+    const projectRoot = targetDirs[0];
 
     // Auto-init if burn.yaml doesn't exist
     const configPath = path.join(projectRoot, "burn.yaml");
     if (!fs.existsSync(configPath)) {
       console.log(chalk.dim("  No burn.yaml found — auto-initializing..."));
-      const { execSync } = await import("node:child_process");
-      try {
-        execSync("git rev-parse --is-inside-work-tree", { cwd: projectRoot, stdio: "pipe" });
-      } catch {
-        console.log(chalk.red("  Not a git repository. Run `git init` first."));
-        process.exit(1);
-      }
-      // Create minimal config
       fs.mkdirSync(path.join(projectRoot, ".burn"), { recursive: true });
     }
 
-    const config = loadConfig(projectRoot, opts.profile as string);
+    await runYoloOnRepo(projectRoot, focus, opts);
+  });
 
-    // Override config for YOLO mode
-    config.execution.maxConcurrentAgents = parseInt(opts.workers as string, 10) || 1;
-    config.brainstorm.enabled = true;
-    config.brainstorm.intervalMinutes = 5; // Brainstorm aggressively
+async function runYoloOnRepo(
+  projectRoot: string,
+  focus: string | undefined,
+  opts: Record<string, string | boolean>
+): Promise<void> {
+  // Auto-init if burn.yaml doesn't exist
+  const configPath = path.join(projectRoot, "burn.yaml");
+  if (!fs.existsSync(configPath)) {
+    console.log(chalk.dim("  No burn.yaml found — auto-initializing..."));
+    fs.mkdirSync(path.join(projectRoot, ".burn"), { recursive: true });
+  }
 
-    // Auto-approve EVERYTHING in YOLO mode
-    config.brainstorm.autoApprove = [
-      { type: "test" },
-      { type: "docs" },
-      { type: "refactor" },
-      { type: "performance" },
-      { type: "security" },
-      { type: "chore" },
-      { type: "bug" },
-      { type: "feature" },
-    ];
+  const config = loadConfig(projectRoot, opts.profile as string);
 
-    // Set daily budget if specified
-    if (opts.budget) {
-      config.safety.maxBudgetPerDayUsd = parseFloat(opts.budget as string);
-    }
+  // Override config for YOLO mode
+  config.execution.maxConcurrentAgents = parseInt(opts.workers as string, 10) || 1;
+  config.brainstorm.enabled = true;
+  config.brainstorm.intervalMinutes = 5;
 
-    // Override focus areas if specified
-    if (focus) {
-      config.brainstorm.focusAreas = parseFocusAreas(focus);
-      config.preferences.style = (config.preferences.style ?? "") +
-        `\nFocus area for improvements: ${focus}`;
-    }
+  // Auto-approve EVERYTHING
+  config.brainstorm.autoApprove = [
+    { type: "test" }, { type: "docs" }, { type: "refactor" },
+    { type: "performance" }, { type: "security" }, { type: "chore" },
+    { type: "bug" }, { type: "feature" },
+  ];
 
-    // Initialize DB
-    getDb(projectRoot);
+  if (opts.budget) {
+    config.safety.maxBudgetPerDayUsd = parseFloat(opts.budget as string);
+  }
 
-    console.log(YOLO_BANNER);
+  if (focus) {
+    config.brainstorm.focusAreas = parseFocusAreas(focus);
+    config.preferences.style = (config.preferences.style ?? "") +
+      `\nFocus area for improvements: ${focus}`;
+  }
 
-    // Check CLI availability
-    const registry = new AdapterRegistry(config);
-    const adapter = await registry.selectAdapter();
-    if (!adapter) {
-      console.log(chalk.red("  No AI CLI available. Install claude, codex, or aider."));
-      process.exit(1);
-    }
+  // Initialize DB (each repo gets its own .burn/)
+  getDb(projectRoot);
 
-    console.log(chalk.dim(`  CLI: ${adapter.name}`));
-    console.log(chalk.dim(`  Workers: ${config.execution.maxConcurrentAgents}`));
-    if (focus) console.log(chalk.dim(`  Focus: ${focus}`));
-    if (config.safety.maxBudgetPerDayUsd != null) {
-      console.log(chalk.dim(`  Daily budget: $${config.safety.maxBudgetPerDayUsd}`));
-    } else {
-      console.log(chalk.dim(`  Budget: unlimited`));
-    }
+  console.log(YOLO_BANNER);
+  console.log(chalk.dim(`  Repo: ${projectRoot}`));
+
+  const registry = new AdapterRegistry(config);
+  const adapter = await registry.selectAdapter();
+  if (!adapter) {
+    console.log(chalk.red("  No AI CLI available. Install claude, codex, or aider."));
+    return;
+  }
+
+  console.log(chalk.dim(`  CLI: ${adapter.name}`));
+  console.log(chalk.dim(`  Workers: ${config.execution.maxConcurrentAgents}`));
+  if (focus) console.log(chalk.dim(`  Focus: ${focus}`));
+  if (config.safety.maxBudgetPerDayUsd != null) {
+    console.log(chalk.dim(`  Daily budget: $${config.safety.maxBudgetPerDayUsd}`));
+  } else {
+    console.log(chalk.dim(`  Budget: unlimited`));
+  }
+  console.log();
+
+  // Seed queue
+  const stats = getQueueStats();
+  const seedCount = parseInt(opts.seed as string, 10) || 5;
+
+  if (stats.pending === 0) {
+    console.log(chalk.cyan(`  Seeding queue with ${seedCount} brainstormed tasks...`));
     console.log();
 
-    // Seed the queue with initial brainstorm
-    const stats = getQueueStats();
-    const seedCount = parseInt(opts.seed as string, 10) || 5;
+    const seedTasks = await brainstormSeed(adapter, projectRoot, config, focus, seedCount);
 
-    if (stats.pending === 0) {
-      console.log(chalk.cyan(`  Seeding queue with ${seedCount} brainstormed tasks...`));
-      console.log();
-
-      const seedTasks = await brainstormSeed(
-        adapter,
-        projectRoot,
-        config,
-        focus,
-        seedCount
-      );
-
-      if (seedTasks.length === 0) {
-        console.log(chalk.yellow("  Could not generate initial tasks. Starting with empty queue."));
-        console.log(chalk.dim("  The brainstorm loop will kick in shortly.\n"));
-      } else {
-        for (const t of seedTasks) {
-          addTask({
-            title: t.title.slice(0, 100),
-            description: t.description,
-            type: t.type,
-            priority: t.priority ?? 3,
-            estimatedComplexity: t.estimatedComplexity ?? "medium",
-            source: "brainstorm",
-          });
-          console.log(
-            chalk.green("  + ") +
-              chalk.dim(`[${t.type}/P${t.priority ?? 3}]`) +
-              ` ${t.title.slice(0, 60)}`
-          );
-        }
-        console.log(chalk.dim(`\n  ${seedTasks.length} tasks queued.\n`));
-      }
+    if (seedTasks.length === 0) {
+      console.log(chalk.yellow("  Could not generate initial tasks. Brainstorm loop will kick in.\n"));
     } else {
-      console.log(chalk.dim(`  Queue already has ${stats.pending} pending tasks. Resuming.\n`));
+      for (const t of seedTasks) {
+        addTask({
+          title: t.title.slice(0, 100),
+          description: t.description,
+          type: t.type,
+          priority: t.priority ?? 3,
+          estimatedComplexity: t.estimatedComplexity ?? "medium",
+          source: "brainstorm",
+        });
+        console.log(
+          chalk.green("  + ") +
+            chalk.dim(`[${t.type}/P${t.priority ?? 3}]`) +
+            ` ${t.title.slice(0, 60)}`
+        );
+      }
+      console.log(chalk.dim(`\n  ${seedTasks.length} tasks queued.\n`));
     }
+  } else {
+    console.log(chalk.dim(`  Queue already has ${stats.pending} pending tasks. Resuming.\n`));
+  }
 
-    if (opts.dryRun) {
-      console.log(chalk.yellow("  Dry run — not starting agents. Tasks are in the queue."));
-      console.log(chalk.dim("  Run `burn start` to execute them."));
-      return;
-    }
+  if (opts.dryRun) {
+    console.log(chalk.yellow("  Dry run — not starting agents."));
+    console.log(chalk.dim("  Run `burn start` to execute them."));
+    return;
+  }
 
-    // Start the orchestrator
-    console.log(chalk.bold.red("  Agents are burning. Ctrl+C to stop.\n"));
+  console.log(chalk.bold.red("  Agents are burning. Ctrl+C to stop.\n"));
 
-    const orchestrator = new Orchestrator(projectRoot, config);
-    await orchestrator.start();
-  });
+  const orchestrator = new Orchestrator(projectRoot, config);
+  await orchestrator.start();
+}
 
 async function brainstormSeed(
   adapter: { execute: Function; name: string },

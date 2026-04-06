@@ -23,6 +23,11 @@ import { updateTaskStatus } from "../core/task-queue.js";
 import { closePR } from "../git/pr.js";
 import { deleteBranch } from "../git/branch.js";
 import type { BurnConfig } from "../config/schema.js";
+import {
+  loadUserPreferences,
+  saveUserPreferences,
+  getPreferencesPath,
+} from "../config/preferences.js";
 
 const BANNER = `
 ${chalk.bold.hex("#FF6B35")("  ╔══════════════════════════════════════╗")}
@@ -60,7 +65,8 @@ ${chalk.bold("Commands:")}
   ${chalk.bold("/budget")}                     Budget dashboard with progress bars
   ${chalk.bold("/report")}                     Cost and usage report (last 7 days)
   ${chalk.bold("/status")}                     System status overview
-  ${chalk.bold("/config")}                     Show current configuration
+  ${chalk.bold("/config")}                     Show project configuration
+  ${chalk.bold("/prefs")} ${chalk.dim("[set|show|reset]")}   Global user preferences (across all projects)
 
   ${chalk.cyan("System")}
   ${chalk.bold("/help")}  ${chalk.dim("or")} ${chalk.bold("/?")}              Show this help
@@ -229,6 +235,11 @@ async function handleInput(
 
       case "/budget":
         handleBudget(state);
+        return;
+
+      case "/prefs":
+      case "/preferences":
+        await handlePreferences(argStr, rl);
         return;
 
       case "/config":
@@ -1327,6 +1338,115 @@ function makeBar(pct: number): string {
   const empty = width - filled;
   const color = pct >= 90 ? chalk.red : pct >= 70 ? chalk.yellow : chalk.green;
   return color("[" + "=".repeat(filled) + " ".repeat(empty) + "]");
+}
+
+async function handlePreferences(action: string, rl: readline.Interface): Promise<void> {
+  const prefs = loadUserPreferences();
+
+  if (!action || action === "show") {
+    console.log(chalk.bold("\n  Global User Preferences"));
+    console.log(chalk.dim(`  File: ${getPreferencesPath()}\n`));
+
+    if (prefs.codingStyle) {
+      console.log(chalk.cyan("  Coding Style"));
+      for (const line of prefs.codingStyle.split("\n")) {
+        console.log(`  ${line}`);
+      }
+      console.log();
+    }
+
+    if (prefs.globalInstructions) {
+      console.log(chalk.cyan("  Global Instructions"));
+      console.log(`  ${prefs.globalInstructions}\n`);
+    }
+
+    if (prefs.patterns?.preferredLanguages?.length) {
+      console.log(`  ${chalk.dim("Languages:")}    ${prefs.patterns.preferredLanguages.join(", ")}`);
+    }
+    if (prefs.patterns?.preferredFrameworks?.length) {
+      console.log(`  ${chalk.dim("Frameworks:")}   ${prefs.patterns.preferredFrameworks.join(", ")}`);
+    }
+    if (prefs.patterns?.codeConventions?.length) {
+      console.log(chalk.cyan("\n  Code Conventions"));
+      for (const c of prefs.patterns.codeConventions) {
+        console.log(`  - ${c}`);
+      }
+    }
+    if (prefs.patterns?.avoidPatterns?.length) {
+      console.log(chalk.cyan("\n  Avoid"));
+      for (const p of prefs.patterns.avoidPatterns) {
+        console.log(`  - ${p}`);
+      }
+    }
+
+    if (prefs.yoloDefaults) {
+      console.log(chalk.cyan("\n  YOLO Defaults"));
+      if (prefs.yoloDefaults.workers) console.log(`  Workers: ${prefs.yoloDefaults.workers}`);
+      if (prefs.yoloDefaults.budget) console.log(`  Budget: $${prefs.yoloDefaults.budget}`);
+      if (prefs.yoloDefaults.focusAreas?.length) console.log(`  Focus: ${prefs.yoloDefaults.focusAreas.join(", ")}`);
+    }
+
+    if (!prefs.codingStyle && !prefs.globalInstructions && !prefs.patterns) {
+      console.log(chalk.dim("  No preferences set yet."));
+      console.log(chalk.dim("  Use /prefs set to configure."));
+    }
+
+    if (prefs.updatedAt) {
+      console.log(chalk.dim(`\n  Last updated: ${prefs.updatedAt}`));
+    }
+    console.log();
+    return;
+  }
+
+  if (action === "set") {
+    console.log(chalk.cyan("\n  Set Global Preferences\n"));
+
+    const style = await ask(rl,
+      `  Coding style (multi-line, empty line to finish):\n  ${chalk.dim("Current: " + (prefs.codingStyle?.split("\n")[0] ?? "not set"))}\n  > `
+    );
+    if (style) prefs.codingStyle = style;
+
+    const instructions = await ask(rl,
+      `  Global instructions for all agents:\n  ${chalk.dim("Current: " + (prefs.globalInstructions?.slice(0, 60) ?? "not set"))}\n  > `
+    );
+    if (instructions) prefs.globalInstructions = instructions;
+
+    const langs = await ask(rl,
+      `  Preferred languages (comma-separated):\n  ${chalk.dim("Current: " + (prefs.patterns?.preferredLanguages?.join(", ") ?? "not set"))}\n  > `
+    );
+    if (langs) {
+      prefs.patterns = prefs.patterns ?? {};
+      prefs.patterns.preferredLanguages = langs.split(",").map(s => s.trim());
+    }
+
+    const frameworks = await ask(rl,
+      `  Preferred frameworks (comma-separated):\n  ${chalk.dim("Current: " + (prefs.patterns?.preferredFrameworks?.join(", ") ?? "not set"))}\n  > `
+    );
+    if (frameworks) {
+      prefs.patterns = prefs.patterns ?? {};
+      prefs.patterns.preferredFrameworks = frameworks.split(",").map(s => s.trim());
+    }
+
+    const avoid = await ask(rl,
+      `  Patterns to avoid (comma-separated):\n  ${chalk.dim("Current: " + (prefs.patterns?.avoidPatterns?.join(", ") ?? "not set"))}\n  > `
+    );
+    if (avoid) {
+      prefs.patterns = prefs.patterns ?? {};
+      prefs.patterns.avoidPatterns = avoid.split(",").map(s => s.trim());
+    }
+
+    saveUserPreferences(prefs);
+    console.log(chalk.green("\n  + ") + `Preferences saved to ${getPreferencesPath()}\n`);
+    return;
+  }
+
+  if (action === "reset") {
+    saveUserPreferences({});
+    console.log(chalk.green("  + ") + "Preferences reset.\n");
+    return;
+  }
+
+  console.log(chalk.yellow("  Usage: /prefs [show|set|reset]"));
 }
 
 function handleConfig(state: InteractiveState): void {

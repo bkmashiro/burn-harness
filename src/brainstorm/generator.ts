@@ -1,4 +1,5 @@
 import type { BurnConfig } from "../config/schema.js";
+import { loadUserPreferences, mergePreferencesIntoPrompt } from "../config/preferences.js";
 import type { AdapterRegistry } from "../adapters/registry.js";
 import { monitorProcess } from "../monitor/output-parser.js";
 import { addTask, type AddTaskInput } from "../core/task-queue.js";
@@ -194,12 +195,19 @@ function buildBrainstormPrompt(
   ignoreAreas: string[],
   maxSuggestions: number
 ): string {
+  // Include global user preferences in brainstorm context
+  const userPrefs = loadUserPreferences();
+  const prefsContext = mergePreferencesIntoPrompt(userPrefs);
+  const prefsSection = prefsContext
+    ? `\n## User Preferences\n${prefsContext}\nSuggestions should align with these preferences.\n`
+    : "";
+
   return `You are analyzing this codebase to suggest improvements.
 Do NOT make any changes. Only analyze and suggest.
 
 ## Focus Area: ${category.name}
 ${category.prompt}
-
+${prefsSection}
 ## Ignore
 ${ignoreAreas.map((a) => `- ${a}`).join("\n")}
 

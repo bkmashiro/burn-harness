@@ -37,6 +37,7 @@ export const yoloCommand = new Command("yolo")
   .description("Fire-and-forget autonomous mode — agents brainstorm and burn non-stop")
   .argument("[focus]", "Optional focus hint for the AI (e.g. 'tests', 'security', 'refactor auth')")
   .option("--workers <n>", "Total concurrent agents across all repos (default: 1, max ~5 for Claude)", "1")
+  .option("--rotate <min>", "Minutes per repo before rotating to next (multi-repo only)", "15")
   .option("--profile <name>", "Config profile to use")
   .option("--budget <usd>", "Daily budget cap in USD (per repo)")
   .option("--seed <n>", "Number of initial brainstorm tasks to generate", "5")
@@ -77,7 +78,9 @@ export const yoloCommand = new Command("yolo")
       // Only run as many repos in parallel as we have workers
       const maxParallel = Math.min(targetDirs.length, totalWorkers);
 
-      console.log(chalk.bold(`  Burning ${targetDirs.length} repos (${totalWorkers} total agents, ${maxParallel} parallel, ${workersPerRepo}/repo):\n`));
+      const rotateMinutes = parseInt(opts.rotate as string, 10) || 15;
+
+      console.log(chalk.bold(`  Burning ${targetDirs.length} repos (${totalWorkers} agents, ${maxParallel} parallel, rotate every ${rotateMinutes}m):\n`));
       for (const dir of targetDirs) {
         console.log(chalk.dim(`    ${path.basename(dir).padEnd(25)} ${dir}`));
       }
@@ -120,15 +123,19 @@ export const yoloCommand = new Command("yolo")
         return child;
       }
 
-      const activeChildren = new Set<ReturnType<typeof fork>>();
+      // Round-robin scheduler: run maxParallel repos at a time,
+      // rotate every rotateMinutes so all repos get a turn.
+      const activeSlots = new Map<string, ReturnType<typeof fork>>(); // dir → child
+      let stopped = false;
 
       const cleanup = () => {
+        stopped = true;
         console.log(chalk.yellow("\n  Stopping all agents..."));
-        for (const child of activeChildren) {
+        for (const child of activeSlots.values()) {
           child.kill("SIGTERM");
         }
         setTimeout(() => {
-          for (const child of activeChildren) {
+          for (const child of activeSlots.values()) {
             child.kill("SIGKILL");
           }
           process.exit(0);
@@ -137,37 +144,74 @@ export const yoloCommand = new Command("yolo")
       process.on("SIGINT", cleanup);
       process.on("SIGTERM", cleanup);
 
-      // Worker pool: spawn up to maxParallel, as one finishes start next
-      const queue = [...targetDirs];
-      await new Promise<void>((resolveAll) => {
-        let finished = 0;
-        const total = targetDirs.length;
+      // Build a round-robin queue of all repos (infinite rotation)
+      let roundRobinIdx = 0;
 
-        function fillPool() {
-          while (activeChildren.size < maxParallel && queue.length > 0) {
-            const dir = queue.shift()!;
+      function nextRepos(n: number): string[] {
+        const picks: string[] = [];
+        for (let i = 0; i < n && i < targetDirs.length; i++) {
+          picks.push(targetDirs[(roundRobinIdx + i) % targetDirs.length]);
+        }
+        roundRobinIdx = (roundRobinIdx + n) % targetDirs.length;
+        return picks;
+      }
+
+      function killSlot(dir: string): Promise<void> {
+        const child = activeSlots.get(dir);
+        if (!child) return Promise.resolve();
+        return new Promise((resolve) => {
+          child.on("close", () => {
+            activeSlots.delete(dir);
+            resolve();
+          });
+          child.kill("SIGTERM");
+          // Force kill after 10s
+          setTimeout(() => {
+            if (activeSlots.has(dir)) {
+              child.kill("SIGKILL");
+              activeSlots.delete(dir);
+              resolve();
+            }
+          }, 10000);
+        });
+      }
+
+      // Main rotation loop
+      while (!stopped) {
+        // Pick next batch of repos
+        const batch = nextRepos(maxParallel);
+
+        // Kill any active slots that aren't in the new batch
+        const toKill = [...activeSlots.keys()].filter(d => !batch.includes(d));
+        if (toKill.length > 0) {
+          console.log(chalk.dim(`\n  Rotating: pausing ${toKill.map(d => path.basename(d)).join(", ")}`));
+          await Promise.all(toKill.map(killSlot));
+        }
+
+        // Start repos that aren't already running
+        for (const dir of batch) {
+          if (!activeSlots.has(dir)) {
+            console.log(chalk.cyan(`  Starting: ${path.basename(dir)}`));
             const child = spawnRepo(dir);
-            activeChildren.add(child);
+            activeSlots.set(dir, child);
 
-            child.on("close", (code) => {
-              activeChildren.delete(child);
-              const name = path.basename(dir);
-              console.log(
-                `  ${chalk.cyan(`[${name}]`)} ${code === 0 ? chalk.green("done") : chalk.red(`exited ${code}`)}`
-              );
-              finished++;
-              if (finished >= total) {
-                resolveAll();
-              } else {
-                fillPool(); // Start next repo in the freed slot
-              }
+            // If child exits on its own (dry-run, error), clean up
+            child.on("close", () => {
+              activeSlots.delete(dir);
             });
           }
         }
 
-        fillPool();
-      });
+        // Wait for the rotation interval
+        const rotateMs = rotateMinutes * 60_000;
+        const deadline = Date.now() + rotateMs;
+        while (Date.now() < deadline && !stopped) {
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
 
+      // Cleanup remaining
+      await Promise.all([...activeSlots.keys()].map(killSlot));
       process.off("SIGINT", cleanup);
       process.off("SIGTERM", cleanup);
       return;

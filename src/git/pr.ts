@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 
 export function pushBranch(cwd: string, branchName: string): void {
   execSync(`git push -u origin "${branchName}"`, { cwd, stdio: "pipe" });
@@ -12,22 +12,23 @@ export function createDraftPR(
   body: string,
   labels: string[] = []
 ): string {
-  // Create PR without labels first (labels may not exist on repo)
-  const cmd = [
-    "gh pr create",
-    `--base "${baseBranch}"`,
-    `--head "${branchName}"`,
-    `--title ${JSON.stringify(title)}`,
-    `--body ${JSON.stringify(body)}`,
+  // Use execFileSync to avoid shell interpretation of body content
+  // (backticks, $(), parentheses in PR body were being executed by /bin/sh)
+  const args = [
+    "pr", "create",
+    "--base", baseBranch,
+    "--head", branchName,
+    "--title", title,
+    "--body", body,
     "--draft",
-  ].join(" ");
+  ];
 
-  const url = execSync(cmd, { cwd, encoding: "utf-8" }).trim();
+  const url = execFileSync("gh", args, { cwd, encoding: "utf-8" }).trim();
 
   // Try to add labels (ignore failure — labels may not exist)
   if (labels.length > 0) {
     try {
-      execSync(`gh pr edit "${url}" --add-label "${labels.join(",")}"`, {
+      execFileSync("gh", ["pr", "edit", url, "--add-label", labels.join(",")], {
         cwd,
         stdio: "pipe",
       });
@@ -41,7 +42,7 @@ export function createDraftPR(
 
 export function closePR(cwd: string, prUrl: string): void {
   try {
-    execSync(`gh pr close "${prUrl}"`, { cwd, stdio: "pipe" });
+    execFileSync("gh", ["pr", "close", prUrl], { cwd, stdio: "pipe" });
   } catch {
     // ignore if already closed
   }

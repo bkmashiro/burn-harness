@@ -33,6 +33,13 @@ export function createWorktree(
     }
   }
 
+  // Delete the branch if it already exists (from a previous attempt)
+  try {
+    execSync(`git branch -D "${branchName}"`, { cwd: projectRoot, stdio: "pipe" });
+  } catch {
+    // Branch doesn't exist — fine
+  }
+
   // Create new worktree with a new branch
   execSync(
     `git worktree add -b "${branchName}" "${worktreePath}" "${baseBranch}"`,

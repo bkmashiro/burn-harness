@@ -239,13 +239,21 @@ brainstorm:
  */
 async function brainstormProjectIdea(
   adapter: { execute: Function; name: string },
-  cwd: string,
+  parentDir: string,
   model: string,
   prefsContext: string,
   rounds: number
 ): Promise<{ name: string; description: string } | null> {
+  // Create a temp git repo for Claude CLI calls (it needs a git working dir)
+  const cwd = fs.mkdtempSync(path.join(parentDir, ".burn-brainstorm-"));
+  execSync("git init", { cwd, stdio: "pipe" });
+  execSync("git commit --allow-empty -m init", { cwd, stdio: "pipe" });
+
+  const cleanup = () => { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {} };
+
   let currentIdea = "";
 
+  try {
   for (let round = 0; round < rounds; round++) {
     const isFirst = round === 0;
     console.log(chalk.dim(`  Round ${round + 1}/${rounds}...`));
@@ -285,7 +293,7 @@ Output ONLY a JSON object:
       permissionMode: "dangerously-skip",
     });
     const genResult = await monitorProcess(
-      (genProc as any).process,
+      genProc.process,
       (event: any) => {
         if (event.message) genOutput += event.message;
         if (event.result) genOutput += event.result;
@@ -333,7 +341,7 @@ Rate 1-10 and give specific criticism. Output ONLY:
       permissionMode: "dangerously-skip",
     });
     const criticResult = await monitorProcess(
-      (criticProc as any).process,
+      criticProc.process,
       (event: any) => {
         if (event.message) criticOutput += event.message;
         if (event.result) criticOutput += event.result;
@@ -372,4 +380,8 @@ Rate 1-10 and give specific criticism. Output ONLY:
 
   console.log(chalk.yellow("  Could not generate a project idea."));
   return null;
+
+  } finally {
+    cleanup();
+  }
 }

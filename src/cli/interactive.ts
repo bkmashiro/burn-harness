@@ -1419,7 +1419,7 @@ function makeBar(pct: number): string {
   return color("[" + "=".repeat(filled) + " ".repeat(empty) + "]");
 }
 
-async function handlePreferences(action: string, rl: readline.Interface): Promise<void> {
+async function handlePreferences(action: string, _rl: readline.Interface): Promise<void> {
   const prefs = loadUserPreferences();
 
   if (!action || action === "show") {
@@ -1477,45 +1477,48 @@ async function handlePreferences(action: string, rl: readline.Interface): Promis
     return;
   }
 
-  if (action === "set") {
-    console.log(chalk.cyan("\n  Set Global Preferences\n"));
+  if (action === "set" || action === "edit") {
+    const prefsPath = getPreferencesPath();
 
-    const style = await ask(rl,
-      `  Coding style (multi-line, empty line to finish):\n  ${chalk.dim("Current: " + (prefs.codingStyle?.split("\n")[0] ?? "not set"))}\n  > `
-    );
-    if (style) prefs.codingStyle = style;
-
-    const instructions = await ask(rl,
-      `  Global instructions for all agents:\n  ${chalk.dim("Current: " + (prefs.globalInstructions?.slice(0, 60) ?? "not set"))}\n  > `
-    );
-    if (instructions) prefs.globalInstructions = instructions;
-
-    const langs = await ask(rl,
-      `  Preferred languages (comma-separated):\n  ${chalk.dim("Current: " + (prefs.patterns?.preferredLanguages?.join(", ") ?? "not set"))}\n  > `
-    );
-    if (langs) {
-      prefs.patterns = prefs.patterns ?? {};
-      prefs.patterns.preferredLanguages = langs.split(",").map(s => s.trim());
+    // Write a template if file doesn't exist or is empty
+    const fs = await import("node:fs");
+    if (!fs.existsSync(prefsPath) || fs.readFileSync(prefsPath, "utf-8").trim().length < 10) {
+      const { saveUserPreferences: save } = await import("../config/preferences.js");
+      save({
+        codingStyle: `\
+- Prefer functional patterns, avoid classes unless necessary
+- Keep functions small and focused
+- Use early returns instead of nested if/else
+- Prefer const over let
+- Use descriptive names`,
+        globalInstructions: "Match the project's existing code style. Write tests that cover edge cases. Keep changes small and focused.",
+        patterns: {
+          preferredLanguages: ["TypeScript", "Rust"],
+          preferredFrameworks: ["Node.js", "Vitest", "esbuild"],
+          avoidPatterns: ["any type", "console.log in production", "bare catch blocks", "TODO without context"],
+          codeConventions: ["Use strict TypeScript", "Prefer immutable data", "Handle errors explicitly"],
+        },
+        yoloDefaults: {
+          workers: 4,
+          focusAreas: ["tests", "docs", "security", "performance"],
+        },
+      });
+      console.log(chalk.green("  + ") + `Created template at ${prefsPath}`);
     }
 
-    const frameworks = await ask(rl,
-      `  Preferred frameworks (comma-separated):\n  ${chalk.dim("Current: " + (prefs.patterns?.preferredFrameworks?.join(", ") ?? "not set"))}\n  > `
-    );
-    if (frameworks) {
-      prefs.patterns = prefs.patterns ?? {};
-      prefs.patterns.preferredFrameworks = frameworks.split(",").map(s => s.trim());
-    }
+    // Open in $EDITOR
+    const editor = process.env.EDITOR ?? process.env.VISUAL ?? "vi";
+    console.log(chalk.cyan(`\n  Opening ${prefsPath} in ${editor}...`));
+    console.log(chalk.dim("  Edit the YAML, save and close. Multiline values supported.\n"));
 
-    const avoid = await ask(rl,
-      `  Patterns to avoid (comma-separated):\n  ${chalk.dim("Current: " + (prefs.patterns?.avoidPatterns?.join(", ") ?? "not set"))}\n  > `
-    );
-    if (avoid) {
-      prefs.patterns = prefs.patterns ?? {};
-      prefs.patterns.avoidPatterns = avoid.split(",").map(s => s.trim());
+    const { execSync: exec } = await import("node:child_process");
+    try {
+      exec(`${editor} "${prefsPath}"`, { stdio: "inherit" });
+      console.log(chalk.green("  + ") + "Preferences saved.\n");
+    } catch {
+      console.log(chalk.yellow(`  Could not open editor. Edit manually:`));
+      console.log(chalk.cyan(`  ${prefsPath}\n`));
     }
-
-    saveUserPreferences(prefs);
-    console.log(chalk.green("\n  + ") + `Preferences saved to ${getPreferencesPath()}\n`);
     return;
   }
 

@@ -1,10 +1,10 @@
 {
   "name": "burn-harness",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI coding CLI orchestrator — run Claude/Codex/Aider non-stop on a dev task queue",
   "type": "module",
   "bin": {
-    "burn": "./dist/cli/index.js"
+    "burn": "dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc",

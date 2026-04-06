@@ -11,7 +11,10 @@ cli:
   preference: [claude]  # Fallback order: claude, codex, aider
 
   claude:
-    model: sonnet
+    # Model selection: string or array (first = primary, rest = fallbacks)
+    # On rate-limit, automatically falls back to next model in the list
+    model: [sonnet, opus]     # Try sonnet first, fall back to opus
+    # model: sonnet            # Or just a single model
     # appendSystemPrompt: |
     #   Follow project conventions strictly.
 

@@ -722,7 +722,7 @@ Be specific — include file paths and concrete instructions.`;
   const cliProcess = adapter.execute({
     prompt,
     cwd: state.projectRoot,
-    model: state.config.cli.claude?.model ?? "sonnet",
+    model: resolveModel(state.config) ?? "sonnet",
     budgetUsd: state.config.safety.maxBudgetPerTaskUsd ?? undefined,
   });
 
@@ -1028,7 +1028,7 @@ Be specific about what each task should do and which files it should touch.`;
   const cliProcess = adapter.execute({
     prompt,
     cwd: state.projectRoot,
-    model: state.config.cli.claude?.model ?? "sonnet",
+    model: resolveModel(state.config) ?? "sonnet",
     budgetUsd: 3,
   });
 
@@ -1179,7 +1179,7 @@ async function handleChat(question: string, state: InteractiveState): Promise<vo
   const cliProcess = adapter.execute({
     prompt: question,
     cwd: state.projectRoot,
-    model: state.config.cli.claude?.model ?? "sonnet",
+    model: resolveModel(state.config) ?? "sonnet",
     budgetUsd: 1,
   });
 
@@ -1251,7 +1251,7 @@ Output the refined description as plain text (not JSON).`;
   const cliProcess = adapter.execute({
     prompt,
     cwd: state.projectRoot,
-    model: state.config.cli.claude?.model ?? "sonnet",
+    model: resolveModel(state.config) ?? "sonnet",
     budgetUsd: 2,
   });
 
@@ -1618,6 +1618,14 @@ function colorStatus(status: string): string {
   };
   const fn = colors[status] ?? chalk.white;
   return fn(status.padEnd(11));
+}
+
+/** Resolve model from config — picks first from array, or the string */
+function resolveModel(config: BurnConfig): string | undefined {
+  const m = config.cli.claude?.model ?? config.cli.codex?.model;
+  if (!m) return undefined;
+  if (Array.isArray(m)) return m[0];
+  return m;
 }
 
 function detectTaskType(description: string): string {

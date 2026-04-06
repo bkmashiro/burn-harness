@@ -33,6 +33,7 @@ export class Worker {
   private state: WorkerState;
   private stopped = false;
   private backoff = new BackoffController();
+  private modelRateLimits = new Map<string, number>();
   private costTracker: CostTracker;
   private log: (msg: string, data?: Record<string, unknown>) => void;
 
@@ -386,11 +387,20 @@ export class Worker {
     exitCode: number,
     logFile: string
   ): Promise<void> {
+    const currentModel = this.getModelForAdapter(adapter.name);
+    const chain = this.getModelChain(adapter.name);
     const delay = this.backoff.nextDelay();
+
+    // Mark the current model as rate-limited — next call will use fallback
+    if (currentModel && chain.length > 1) {
+      this.markModelRateLimited(adapter.name, currentModel, delay);
+    }
+
     this.log("Rate limited, backing off", {
       taskId: task.id,
+      model: currentModel,
+      nextModel: this.getModelForAdapter(adapter.name), // May have changed after marking
       delay: formatDuration(delay),
-      attempt: this.backoff.currentAttempt,
     });
 
     this.state.status = "rate-limited";
@@ -400,15 +410,16 @@ export class Worker {
       taskId: task.id,
       attemptNumber: task.current_attempt,
       cli: adapter.name,
+      model: currentModel,
       exitCode,
-      failureReason: "Rate limited",
+      failureReason: `Rate limited (model: ${currentModel ?? "default"})`,
       logFile,
     });
 
     // Re-queue the task (don't count as a full failed attempt)
     updateTaskStatus(task.id, "pending", {
       worker_id: null,
-      current_attempt: task.current_attempt - 1, // Don't count rate-limit as attempt
+      current_attempt: task.current_attempt - 1,
     });
 
     await this.sleep(delay);
@@ -461,12 +472,72 @@ export class Worker {
     return parts.join("\n");
   }
 
-  private getModelForAdapter(adapterName: string): string | undefined {
+  /**
+   * Resolve the model chain for an adapter.
+   * Returns an array like ["sonnet", "opus"] — first is primary, rest are fallbacks.
+   *
+   * Config supports:
+   *   model: "sonnet"                    → ["sonnet"]
+   *   model: ["sonnet", "opus"]          → ["sonnet", "opus"]
+   *   model: "sonnet" + fallbackModel: "opus" → ["sonnet", "opus"]
+   *   (nothing set)                      → [] (adapter picks default)
+   */
+  private getModelChain(adapterName: string): string[] {
     const cliConfig = this.config.cli[adapterName as keyof typeof this.config.cli];
-    if (cliConfig && typeof cliConfig === "object" && "model" in cliConfig) {
-      return cliConfig.model;
+    if (!cliConfig || typeof cliConfig !== "object") return [];
+
+    const cfg = cliConfig as Record<string, unknown>;
+    const models: string[] = [];
+
+    if (cfg.model) {
+      if (Array.isArray(cfg.model)) {
+        models.push(...(cfg.model as string[]));
+      } else {
+        models.push(cfg.model as string);
+      }
     }
-    return undefined;
+
+    // Append legacy fallbackModel if not already in list
+    if (cfg.fallbackModel && typeof cfg.fallbackModel === "string") {
+      if (!models.includes(cfg.fallbackModel)) {
+        models.push(cfg.fallbackModel);
+      }
+    }
+
+    return models;
+  }
+
+  /** Get the current best model to use (skipping rate-limited ones) */
+  private getModelForAdapter(adapterName: string): string | undefined {
+    const chain = this.getModelChain(adapterName);
+    if (chain.length === 0) return undefined;
+
+    // Check if primary model was recently rate-limited, try fallbacks
+    for (const model of chain) {
+      const limitKey = `model:${adapterName}:${model}`;
+      const limitUntil = this.modelRateLimits.get(limitKey) ?? 0;
+      if (Date.now() >= limitUntil) {
+        return model;
+      }
+    }
+
+    // All rate-limited — return primary (will hit backoff anyway)
+    return chain[0];
+  }
+
+  /** Mark a specific model as rate-limited, triggering fallback to next */
+  private markModelRateLimited(adapterName: string, model: string, durationMs: number): void {
+    const limitKey = `model:${adapterName}:${model}`;
+    this.modelRateLimits.set(limitKey, Date.now() + durationMs);
+
+    const chain = this.getModelChain(adapterName);
+    const currentIdx = chain.indexOf(model);
+    if (currentIdx >= 0 && currentIdx < chain.length - 1) {
+      this.log("Model rate-limited, falling back", {
+        from: model,
+        to: chain[currentIdx + 1],
+      });
+    }
   }
 
   private sleep(ms: number): Promise<void> {

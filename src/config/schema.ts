@@ -1,7 +1,11 @@
 import { z } from "zod";
 
 export const CLIConfigSchema = z.object({
-  model: z.string().optional(),
+  // Model selection: first in list is primary, rest are fallbacks
+  // e.g. ["sonnet", "opus"] → try sonnet, fall back to opus on rate-limit
+  // Single string also works: "sonnet"
+  model: z.union([z.string(), z.array(z.string())]).optional(),
+  // Legacy field — merged into model array if model is a string
   fallbackModel: z.string().optional(),
   permissionMode: z.enum(["auto", "dangerously-skip"]).default("auto"),
   maxBudgetPerTask: z.number().positive().optional(),

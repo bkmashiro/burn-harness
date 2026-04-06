@@ -49,6 +49,8 @@ export interface CLICapabilities {
   supportsSessionResume: boolean;
   supportsSystemPrompt: boolean;
   supportsPermissionBypass: boolean;
+  supportsTokenReporting: boolean; // Whether CLI reports token usage
+  supportsCostReporting: boolean;  // Whether CLI reports USD cost
   supportedModels: string[];
 }
 

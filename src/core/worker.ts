@@ -66,18 +66,21 @@ export class Worker {
 
     while (!this.stopped) {
       try {
-        // Check budget limits
-        if (this.costTracker.isDailyBudgetExceeded()) {
-          this.log("Daily budget exceeded, pausing worker");
+        // Check all budget limits (USD, tokens, time — only those configured)
+        const budgetStatus = this.costTracker.checkBudget();
+        if (budgetStatus.exceeded) {
+          this.log("Budget limit hit", {
+            reason: budgetStatus.reason,
+            summary: budgetStatus.summary,
+          });
+          if (budgetStatus.action === "stop") {
+            this.stop();
+            break;
+          }
+          // action === "pause" — wait and re-check
           this.state.status = "rate-limited";
-          await this.sleep(60_000); // Check again in 1 minute
+          await this.sleep(60_000);
           continue;
-        }
-
-        if (this.costTracker.isTotalBudgetExceeded()) {
-          this.log("Total budget exceeded, stopping worker");
-          this.stop();
-          break;
         }
 
         // Try to claim a task
@@ -105,6 +108,7 @@ export class Worker {
   }
 
   private async executeTask(task: Task): Promise<void> {
+    const taskStartTime = Date.now();
     this.log("Executing task", { taskId: task.id, title: task.title });
 
     // Select adapter
@@ -165,7 +169,7 @@ export class Worker {
         prompt,
         cwd: worktreePath,
         model: this.getModelForAdapter(adapter.name),
-        budgetUsd: task.budget_limit_usd ?? this.config.safety.maxBudgetPerTaskUsd,
+        budgetUsd: task.budget_limit_usd ?? this.config.safety.maxBudgetPerTaskUsd ?? undefined,
         timeoutMs: this.config.execution.taskTimeoutMinutes * 60 * 1000,
         appendPrompt: this.config.preferences.style ?? undefined,
       });
@@ -188,6 +192,9 @@ export class Worker {
 
       sessionLog.close();
 
+      const taskRuntimeMs = Date.now() - taskStartTime;
+      this.costTracker.addRuntime(taskRuntimeMs);
+
       // Record costs
       if (result.costUsd > 0) {
         this.costTracker.record({
@@ -198,6 +205,23 @@ export class Worker {
           tokensOut: result.tokensOut,
           costUsd: result.costUsd,
         });
+      }
+
+      // Check per-task budget (tokens, runtime, type allocation)
+      const taskBudget = this.costTracker.checkTaskBudget(
+        result.costUsd + task.estimated_cost_usd,
+        result.tokensIn + result.tokensOut + task.total_tokens_used,
+        taskRuntimeMs,
+        task.budget_limit_usd,
+        task.type
+      );
+      if (taskBudget.exceeded) {
+        this.log("Task budget exceeded", {
+          taskId: task.id,
+          reason: taskBudget.reason,
+          summary: taskBudget.summary,
+        });
+        // Still save whatever work was done
       }
 
       // Handle result

@@ -247,6 +247,45 @@ export function getTotalCost(): number {
   return row.total;
 }
 
+export function getDailyTokens(): number {
+  const db = getDb();
+  const today = new Date().toISOString().split("T")[0];
+  const row = db
+    .prepare("SELECT COALESCE(SUM(tokens_in + tokens_out), 0) as total FROM cost_tracking WHERE date = ?")
+    .get(today) as { total: number };
+  return row.total;
+}
+
+export function getTotalTokens(): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT COALESCE(SUM(tokens_in + tokens_out), 0) as total FROM cost_tracking")
+    .get() as { total: number };
+  return row.total;
+}
+
+export function getTaskTokens(taskId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT COALESCE(SUM(tokens_used), 0) as total FROM attempts WHERE task_id = ?")
+    .get(taskId) as { total: number };
+  return row.total;
+}
+
+export function getDailyCostByType(type: string): number {
+  const db = getDb();
+  const today = new Date().toISOString().split("T")[0];
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(ct.cost_usd), 0) as total
+       FROM cost_tracking ct
+       JOIN tasks t ON ct.task_id = t.id
+       WHERE ct.date = ? AND t.type = ?`
+    )
+    .get(today, type) as { total: number };
+  return row.total;
+}
+
 export function getQueueStats(): {
   pending: number;
   executing: number;

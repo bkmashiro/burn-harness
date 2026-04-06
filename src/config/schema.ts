@@ -43,11 +43,43 @@ export const ExecutionConfigSchema = z
     maxAttemptsPerTask: 3,
   });
 
+export const BudgetAllocationSchema = z
+  .object({
+    // Percentage-based allocation by task type (must sum to <= 100)
+    // If not set, no allocation limits — first come first served
+    feature: z.number().min(0).max(100).optional(),
+    bug: z.number().min(0).max(100).optional(),
+    refactor: z.number().min(0).max(100).optional(),
+    test: z.number().min(0).max(100).optional(),
+    docs: z.number().min(0).max(100).optional(),
+    performance: z.number().min(0).max(100).optional(),
+    security: z.number().min(0).max(100).optional(),
+    chore: z.number().min(0).max(100).optional(),
+    brainstorm: z.number().min(0).max(100).optional(),
+  })
+  .optional();
+
 export const SafetyConfigSchema = z
   .object({
-    maxBudgetPerTaskUsd: z.number().positive().default(5),
-    maxBudgetPerDayUsd: z.number().positive().default(50),
-    maxBudgetTotalUsd: z.number().positive().default(500),
+    // USD-based limits (all optional — if unset, no cap)
+    maxBudgetPerTaskUsd: z.number().positive().optional(),
+    maxBudgetPerDayUsd: z.number().positive().optional(),
+    maxBudgetTotalUsd: z.number().positive().optional(),
+
+    // Token-based limits (all optional — if unset, no cap)
+    maxTokensPerTask: z.number().int().positive().optional(),
+    maxTokensPerDay: z.number().int().positive().optional(),
+    maxTokensTotal: z.number().int().positive().optional(),
+
+    // Time-based limits (all optional — if unset, no cap)
+    maxRuntimePerTaskMinutes: z.number().positive().optional(),   // wall-clock per task
+    maxRuntimePerDayMinutes: z.number().positive().optional(),    // total agent runtime per day
+    maxRuntimePerSessionHours: z.number().positive().optional(),  // single `burn start` session
+
+    // Percentage-based budget allocation by task type
+    budgetAllocation: BudgetAllocationSchema,
+
+    // Other safety limits
     maxFilesModifiedPerTask: z.number().int().positive().default(20),
     maxLinesChangedPerTask: z.number().int().positive().default(1000),
     requireApprovalForTypes: z.array(z.string()).default(["security"]),
@@ -56,9 +88,6 @@ export const SafetyConfigSchema = z
       .default(["*.env*", "credentials.*", ".github/workflows/*"]),
   })
   .default({
-    maxBudgetPerTaskUsd: 5,
-    maxBudgetPerDayUsd: 50,
-    maxBudgetTotalUsd: 500,
     maxFilesModifiedPerTask: 20,
     maxLinesChangedPerTask: 1000,
     requireApprovalForTypes: ["security"],

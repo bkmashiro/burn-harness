@@ -17,6 +17,8 @@ export class CodexAdapter implements CLIAdapter {
       supportsSessionResume: true,
       supportsSystemPrompt: false,
       supportsPermissionBypass: true,
+      supportsTokenReporting: false,  // Codex doesn't reliably report token counts
+      supportsCostReporting: false,   // Codex doesn't report USD cost
       supportedModels: ["o3", "o4-mini", "gpt-4.1"],
     };
   }

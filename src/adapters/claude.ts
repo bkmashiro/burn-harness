@@ -17,6 +17,8 @@ export class ClaudeAdapter implements CLIAdapter {
       supportsSessionResume: true,
       supportsSystemPrompt: true,
       supportsPermissionBypass: true,
+      supportsTokenReporting: true,
+      supportsCostReporting: true,
       supportedModels: ["opus", "sonnet", "haiku"],
     };
   }

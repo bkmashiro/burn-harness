@@ -12,10 +12,7 @@ export function createDraftPR(
   body: string,
   labels: string[] = []
 ): string {
-  const labelArgs = labels.length
-    ? `--label "${labels.join(",")}"`
-    : "";
-
+  // Create PR without labels first (labels may not exist on repo)
   const cmd = [
     "gh pr create",
     `--base "${baseBranch}"`,
@@ -23,12 +20,22 @@ export function createDraftPR(
     `--title ${JSON.stringify(title)}`,
     `--body ${JSON.stringify(body)}`,
     "--draft",
-    labelArgs,
-  ]
-    .filter(Boolean)
-    .join(" ");
+  ].join(" ");
 
   const url = execSync(cmd, { cwd, encoding: "utf-8" }).trim();
+
+  // Try to add labels (ignore failure — labels may not exist)
+  if (labels.length > 0) {
+    try {
+      execSync(`gh pr edit "${url}" --add-label "${labels.join(",")}"`, {
+        cwd,
+        stdio: "pipe",
+      });
+    } catch {
+      // Labels don't exist on this repo — that's fine
+    }
+  }
+
   return url;
 }
 

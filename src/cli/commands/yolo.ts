@@ -200,7 +200,25 @@ export const yoloCommand = new Command("yolo")
       }
 
       // Main rotation loop
+      let rotationCount = 0;
+      const reposPerCycle = Math.ceil(targetDirs.length / maxParallel);
+
       while (!stopped) {
+        // Re-scout every full cycle through all repos
+        if (rotationCount > 0 && rotationCount % reposPerCycle === 0) {
+          console.log(chalk.cyan("\n  🔍 Re-scouting: re-ranking repos based on current state...\n"));
+          const newScores = await scoutRepos(targetDirs, focus);
+          targetDirs.sort((a, b) => (newScores.get(b) ?? 0) - (newScores.get(a) ?? 0));
+          roundRobinIdx = 0; // Reset to start from highest priority
+
+          for (let i = 0; i < Math.min(5, targetDirs.length); i++) {
+            const d = targetDirs[i];
+            const s = newScores.get(d) ?? 0;
+            console.log(chalk.dim(`  ${i + 1}. ${path.basename(d).padEnd(25)} score: ${s}`));
+          }
+          console.log();
+        }
+
         // Pick next batch of repos
         const batch = nextRepos(maxParallel);
 
@@ -218,12 +236,13 @@ export const yoloCommand = new Command("yolo")
             const child = spawnRepo(dir);
             activeSlots.set(dir, child);
 
-            // If child exits on its own (dry-run, error), clean up
             child.on("close", () => {
               activeSlots.delete(dir);
             });
           }
         }
+
+        rotationCount++;
 
         // Wait for the rotation interval
         const rotateMs = rotateMinutes * 60_000;

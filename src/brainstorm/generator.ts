@@ -115,7 +115,43 @@ export class BrainstormGenerator {
     }
 
     const suggestions = parseSuggestions(output);
+
+    if (suggestions.length === 0) {
+      // Log what we got for debugging
+      const preview = output.trim().slice(0, 200);
+      console.error(`[brainstorm] No suggestions parsed from ${output.length} chars of output: ${preview}...`);
+      return [];
+    }
+
     const deduped = await this.deduplicate(suggestions);
+
+    if (deduped.length === 0 && suggestions.length > 0) {
+      console.error(`[brainstorm] ${suggestions.length} suggestions all deduplicated. Clearing old history to allow fresh ideas.`);
+      // Clear old history so brainstorm can generate new ideas
+      const db = getDb();
+      db.prepare("DELETE FROM brainstorm_history WHERE created_at < datetime('now', '-1 hour')").run();
+      // Retry dedup with cleared history
+      const retried = await this.deduplicate(suggestions);
+      if (retried.length > 0) {
+        for (const s of retried) {
+          this.recordSuggestion(s, category.name);
+        }
+        for (const s of retried) {
+          if (this.shouldAutoApprove(s)) {
+            addTask({
+              title: s.title,
+              description: s.description,
+              type: s.type,
+              priority: s.priority,
+              estimatedComplexity: s.estimatedComplexity,
+              targetFiles: s.targetFiles,
+              source: "brainstorm",
+            } as AddTaskInput);
+          }
+        }
+        return retried;
+      }
+    }
 
     // Store in history
     for (const s of deduped) {

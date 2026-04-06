@@ -157,11 +157,19 @@ export class Worker {
 
     // Build prompt with context
     const prompt = this.buildPrompt(task);
+    const selectedModel = this.getModelForAdapter(adapter.name);
     const sessionLog = createSessionLogger(
       this.projectRoot,
       task.id,
       task.current_attempt
     );
+
+    this.log("Invoking CLI", {
+      taskId: task.id,
+      cli: adapter.name,
+      model: selectedModel ?? "default",
+      branch: branchName,
+    });
 
     let sessionId: string | undefined;
 
@@ -170,7 +178,7 @@ export class Worker {
       const cliProcess = adapter.execute({
         prompt,
         cwd: worktreePath,
-        model: this.getModelForAdapter(adapter.name),
+        model: selectedModel,
         budgetUsd: task.budget_limit_usd ?? this.config.safety.maxBudgetPerTaskUsd ?? undefined,
         timeoutMs: this.config.execution.taskTimeoutMinutes * 60 * 1000,
         appendPrompt: this.config.preferences.style ?? undefined,
@@ -272,7 +280,7 @@ export class Worker {
       }
 
       // Success! Commit and create PR
-      await this.handleSuccess(task, adapter.name, branchName, worktreePath, sessionLog.logPath, result, sessionId);
+      await this.handleSuccess(task, adapter.name, selectedModel, branchName, worktreePath, sessionLog.logPath, result, sessionId);
     } catch (err) {
       sessionLog.close();
       const message = err instanceof Error ? err.message : String(err);
@@ -294,6 +302,7 @@ export class Worker {
   private async handleSuccess(
     task: Task,
     cliName: string,
+    model: string | undefined,
     branchName: string,
     worktreePath: string,
     logFile: string,
@@ -315,6 +324,7 @@ export class Worker {
       taskId: task.id,
       attemptNumber: task.current_attempt,
       cli: cliName,
+      model: model ?? undefined,
       exitCode: 0,
       tokensUsed: result.tokensIn + result.tokensOut,
       costUsd: result.costUsd,
@@ -325,7 +335,7 @@ export class Worker {
 
     // Check if there are actual changes to push
     if (!diffStat) {
-      this.log("No changes made, marking as done", { taskId: task.id });
+      this.log("No changes made, marking as done", { taskId: task.id, model: model ?? "default" });
       updateTaskStatus(task.id, "done");
       return;
     }
@@ -367,7 +377,7 @@ export class Worker {
         );
 
         updateTaskStatus(task.id, "reviewing", { pr_url: prUrl });
-        this.log("PR created", { taskId: task.id, prUrl });
+        this.log("PR created", { taskId: task.id, model: model ?? "default", prUrl });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.log("Failed to create PR, marking as reviewing", {

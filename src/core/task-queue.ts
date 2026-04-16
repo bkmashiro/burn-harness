@@ -411,6 +411,80 @@ export function renderDependencyTree(tasks: Task[]): string {
   return lines.join("\n");
 }
 
+/**
+ * Get cost breakdown by adapter/CLI (e.g., claude, codex, anthropic).
+ */
+export function getCostByAdapter(): Array<{ cli: string; cost: number; tokens: number; calls: number }> {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT cli, SUM(cost_usd) as cost, SUM(tokens_in + tokens_out) as tokens, COUNT(*) as calls
+       FROM cost_tracking
+       GROUP BY cli
+       ORDER BY cost DESC`
+    )
+    .all() as Array<{ cli: string; cost: number; tokens: number; calls: number }>;
+}
+
+/**
+ * Get per-task cost summary for recent tasks.
+ */
+export function getPerTaskCosts(limit = 20): Array<{ id: string; title: string; type: string; cost: number; tokens: number }> {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT t.id, t.title, t.type, t.estimated_cost_usd as cost, t.total_tokens_used as tokens
+       FROM tasks t
+       WHERE t.estimated_cost_usd > 0
+       ORDER BY t.completed_at DESC
+       LIMIT ?`
+    )
+    .all(limit) as Array<{ id: string; title: string; type: string; cost: number; tokens: number }>;
+}
+
+/**
+ * Estimate cost for pending tasks based on historical averages.
+ */
+export function estimateQueueCost(): { estimatedCost: number; avgCostPerTask: number; pendingCount: number } {
+  const db = getDb();
+
+  // Average cost of completed tasks
+  const avgRow = db
+    .prepare(
+      "SELECT AVG(estimated_cost_usd) as avg_cost FROM tasks WHERE status = 'done' AND estimated_cost_usd > 0"
+    )
+    .get() as { avg_cost: number | null };
+
+  const avgCost = avgRow?.avg_cost ?? 0.5; // Default estimate: $0.50/task
+
+  const pendingRow = db
+    .prepare("SELECT COUNT(*) as count FROM tasks WHERE status IN ('pending', 'blocked')")
+    .get() as { count: number };
+
+  return {
+    estimatedCost: avgCost * pendingRow.count,
+    avgCostPerTask: avgCost,
+    pendingCount: pendingRow.count,
+  };
+}
+
+/**
+ * Get today's cost breakdown by hour for the report.
+ */
+export function getHourlyCosts(): Array<{ hour: string; cost: number; tokens: number }> {
+  const db = getDb();
+  const today = new Date().toISOString().split("T")[0];
+  return db
+    .prepare(
+      `SELECT strftime('%H:00', created_at) as hour, SUM(cost_usd) as cost, SUM(tokens_in + tokens_out) as tokens
+       FROM cost_tracking
+       WHERE date = ?
+       GROUP BY hour
+       ORDER BY hour`
+    )
+    .all(today) as Array<{ hour: string; cost: number; tokens: number }>;
+}
+
 export function getQueueStats(): {
   pending: number;
   executing: number;

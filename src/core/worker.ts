@@ -234,6 +234,12 @@ export class Worker {
           tokensOut: result.tokensOut,
           costUsd: result.costUsd,
         });
+
+        // Check cost warning threshold
+        const costWarning = this.costTracker.checkCostWarning();
+        if (costWarning) {
+          this.log("COST WARNING", { warning: costWarning });
+        }
       }
 
       // Check per-task budget (tokens, runtime, type allocation)

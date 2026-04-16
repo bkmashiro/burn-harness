@@ -23,6 +23,7 @@ export interface BudgetStatus {
 export class CostTracker {
   private sessionStartedAt = Date.now();
   private sessionRuntimeMs = 0; // Accumulated agent runtime in this session
+  private costWarningEmitted = false;
 
   constructor(private config: BurnConfig) {}
 
@@ -291,6 +292,27 @@ export class CostTracker {
     }
 
     return warnings.length > 0 ? warnings.join("; ") : null;
+  }
+
+  /**
+   * Check if session cost has exceeded the warning threshold.
+   * Returns a warning string once (subsequent calls return null until cost crosses next $5 increment).
+   */
+  checkCostWarning(): string | null {
+    const threshold = this.config.safety.costWarningThresholdUsd ?? 5;
+    const dailyCost = getDailyCost();
+
+    // Emit warning at each threshold increment ($5, $10, $15, ...)
+    const thresholdLevel = Math.floor(dailyCost / threshold);
+    if (thresholdLevel > 0 && !this.costWarningEmitted) {
+      this.costWarningEmitted = true;
+      return `Daily cost ($${dailyCost.toFixed(2)}) has exceeded warning threshold ($${threshold.toFixed(2)})`;
+    }
+    // Reset for next increment
+    if (thresholdLevel === 0) {
+      this.costWarningEmitted = false;
+    }
+    return null;
   }
 
   /** Get a human-readable summary of all active limits */

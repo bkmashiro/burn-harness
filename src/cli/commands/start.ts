@@ -3,6 +3,7 @@ import { loadConfig } from "../../config/loader.js";
 import { Orchestrator } from "../../core/orchestrator.js";
 import { startDashboard } from "../../dashboard/server.js";
 import { registerInstance, unregisterInstance } from "./ps.js";
+import { estimateQueueCost, getDailyCost, getQueueStats } from "../../core/task-queue.js";
 import chalk from "chalk";
 
 export const startCommand = new Command("start")
@@ -45,6 +46,36 @@ export const startCommand = new Command("start")
       )
     );
     console.log();
+
+    // Show cost estimate before starting
+    const stats = getQueueStats();
+    const estimate = estimateQueueCost();
+    const dailySpent = getDailyCost();
+
+    if (stats.pending > 0) {
+      console.log(
+        chalk.dim(
+          `  Queue: ${stats.pending} pending, ${stats.done} done, ${stats.failed} failed | Today: $${dailySpent.toFixed(2)} spent`
+        )
+      );
+      if (estimate.pendingCount > 0) {
+        console.log(
+          chalk.dim(
+            `  Estimated cost for ${estimate.pendingCount} pending tasks: ~$${estimate.estimatedCost.toFixed(2)} (~$${estimate.avgCostPerTask.toFixed(2)}/task)`
+          )
+        );
+      }
+      console.log();
+    }
+
+    // Show cost warning threshold
+    const warnThreshold = config.safety.costWarningThresholdUsd ?? 5;
+    if (dailySpent > warnThreshold) {
+      console.log(
+        chalk.yellow(`  ⚠ Daily cost ($${dailySpent.toFixed(2)}) already exceeds warning threshold ($${warnThreshold.toFixed(2)})`)
+      );
+      console.log();
+    }
 
     registerInstance(projectRoot, `start${opts.profile ? ` --profile ${opts.profile}` : ""}`);
     process.on("exit", unregisterInstance);

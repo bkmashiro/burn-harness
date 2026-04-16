@@ -83,6 +83,9 @@ export const SafetyConfigSchema = z
     // Percentage-based budget allocation by task type
     budgetAllocation: BudgetAllocationSchema,
 
+    // Cost warning threshold (default $5) — logs warning when session spend exceeds this
+    costWarningThresholdUsd: z.number().positive().default(5),
+
     // Other safety limits
     maxFilesModifiedPerTask: z.number().int().positive().default(20),
     maxLinesChangedPerTask: z.number().int().positive().default(1000),
@@ -92,6 +95,7 @@ export const SafetyConfigSchema = z
       .default(["*.env*", "credentials.*", ".github/workflows/*"]),
   })
   .default({
+    costWarningThresholdUsd: 5,
     maxFilesModifiedPerTask: 20,
     maxLinesChangedPerTask: 1000,
     requireApprovalForTypes: ["security"],

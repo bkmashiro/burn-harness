@@ -1,3 +1,6 @@
+import { execSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import type { BurnConfig } from "../config/schema.js";
 import { loadUserPreferences, mergePreferencesIntoPrompt } from "../config/preferences.js";
 import type { AdapterRegistry } from "../adapters/registry.js";
@@ -12,6 +15,9 @@ export interface BrainstormSuggestion {
   priority: number;
   estimatedComplexity: string;
   targetFiles?: string[];
+  impactScore?: number;   // 1-10: how much value this adds
+  effortScore?: number;   // 1-10: how much work this requires (lower = easier)
+  source?: string;        // "ai-analysis" | "todo-scan" | "git-analysis"
 }
 
 const BRAINSTORM_CATEGORIES = [
@@ -129,14 +135,28 @@ export class BrainstormGenerator {
       }
     }
 
-    const suggestions = parseSuggestions(output);
+    let suggestions = parseSuggestions(output);
 
     if (suggestions.length === 0) {
       // Log what we got for debugging
       const preview = output.trim().slice(0, 200);
       console.error(`[brainstorm] No suggestions parsed from ${output.length} chars of output: ${preview}...`);
-      return [];
     }
+
+    // Supplement with TODO/FIXME scan results (every other run)
+    if (this.lastCategory % 2 === 0) {
+      const todoSuggestions = this.scanTodoComments();
+      suggestions = [...suggestions, ...todoSuggestions];
+    }
+
+    if (suggestions.length === 0) return [];
+
+    // Sort by impact/effort ratio (high impact, low effort first)
+    suggestions.sort((a, b) => {
+      const ratioA = (a.impactScore ?? 5) / (a.effortScore ?? 5);
+      const ratioB = (b.impactScore ?? 5) / (b.effortScore ?? 5);
+      return ratioB - ratioA;
+    });
 
     const deduped = await this.deduplicate(suggestions);
 
@@ -265,6 +285,112 @@ export class BrainstormGenerator {
     });
   }
 
+  /**
+   * Scan for TODO/FIXME/HACK/XXX comments in the codebase.
+   */
+  private scanTodoComments(): BrainstormSuggestion[] {
+    const suggestions: BrainstormSuggestion[] = [];
+    try {
+      const ignoreGlobs = this.config.brainstorm.ignoreAreas
+        .map((a) => `--glob '!${a}'`)
+        .join(" ");
+      const output = execSync(
+        `rg --no-heading -n '(TODO|FIXME|HACK|XXX|BUG):?\\s' ${ignoreGlobs} --type-add 'code:*.{ts,tsx,js,jsx,py,rs,go,java,rb,c,cpp,h}' -t code 2>/dev/null || true`,
+        { cwd: this.projectRoot, encoding: "utf-8", timeout: 15_000 }
+      ).trim();
+
+      if (!output) return [];
+
+      const lines = output.split("\n").filter(Boolean).slice(0, 50);
+      const grouped = new Map<string, { file: string; line: number; text: string; tag: string }[]>();
+
+      for (const line of lines) {
+        const match = line.match(/^(.+?):(\d+):.*?(TODO|FIXME|HACK|XXX|BUG):?\s*(.*)$/);
+        if (!match) continue;
+        const [, file, lineNo, tag, text] = match;
+        const key = `${tag}:${text.slice(0, 40).toLowerCase().trim()}`;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key)!.push({ file, line: parseInt(lineNo, 10), text: text.trim(), tag });
+      }
+
+      for (const [, items] of grouped) {
+        const first = items[0];
+        const type = first.tag === "BUG" || first.tag === "FIXME" ? "bug" : "chore";
+        const priority = first.tag === "BUG" || first.tag === "FIXME" ? 2 : 4;
+        suggestions.push({
+          title: `Fix ${first.tag}: ${first.text.slice(0, 60)}`,
+          description: `Address ${first.tag} comment in ${first.file}:${first.line}: "${first.text}"${items.length > 1 ? ` (and ${items.length - 1} similar)` : ""}`,
+          type,
+          priority,
+          estimatedComplexity: "small",
+          targetFiles: [...new Set(items.map((i) => i.file))].slice(0, 5),
+          impactScore: first.tag === "BUG" || first.tag === "FIXME" ? 7 : 4,
+          effortScore: 3,
+          source: "todo-scan",
+        });
+      }
+    } catch {
+      // rg not available or failed
+    }
+    return suggestions.slice(0, 10);
+  }
+
+  /**
+   * Analyze recent git history to find hot files and recent patterns.
+   */
+  private analyzeGitHistory(): { recentChanges: string; hotFiles: string[] } {
+    try {
+      const log = execSync(
+        "git log --oneline --no-merges -20 2>/dev/null || true",
+        { cwd: this.projectRoot, encoding: "utf-8", timeout: 10_000 }
+      ).trim();
+
+      // Find files changed most frequently in recent commits
+      const fileFreq = execSync(
+        "git log --name-only --no-merges --pretty=format: -30 2>/dev/null | sort | uniq -c | sort -rn | head -15 || true",
+        { cwd: this.projectRoot, encoding: "utf-8", timeout: 10_000 }
+      ).trim();
+
+      const hotFiles = fileFreq
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => l.trim().split(/\s+/).slice(1).join(" "))
+        .filter(Boolean);
+
+      return { recentChanges: log, hotFiles };
+    } catch {
+      return { recentChanges: "", hotFiles: [] };
+    }
+  }
+
+  /**
+   * Scan README, ROADMAP, and similar project docs for planned work.
+   */
+  private scanProjectDocs(): string {
+    const docFiles = ["README.md", "ROADMAP.md", "CONTRIBUTING.md", "CHANGELOG.md", "TODO.md"];
+    const sections: string[] = [];
+
+    for (const name of docFiles) {
+      const filePath = path.join(this.projectRoot, name);
+      if (fs.existsSync(filePath)) {
+        try {
+          const content = fs.readFileSync(filePath, "utf-8");
+          // Extract only relevant sections (roadmap, todo, planned, future)
+          const relevantSections = content
+            .split(/^##?\s+/m)
+            .filter((s) => /todo|roadmap|planned|future|known.issues|limitations/i.test(s.split("\n")[0] ?? ""))
+            .map((s) => s.slice(0, 500));
+          if (relevantSections.length > 0) {
+            sections.push(`### ${name}\n${relevantSections.join("\n---\n")}`);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+    return sections.join("\n\n").slice(0, 2000);
+  }
+
   private buildPrompt(
     category: { name: string; prompt: string },
     ignoreAreas: string[],
@@ -286,12 +412,24 @@ export class BrainstormGenerator {
       ? `\n## Already Done or In Progress (DO NOT suggest these again)\n${doneTasks.map(t => `- [${t.type}] ${t.title}`).join("\n")}\n\nSuggest DIFFERENT improvements that are NOT in the list above.\n`
       : "";
 
+    // Gather project context
+    const gitContext = this.analyzeGitHistory();
+    const projectDocs = this.scanProjectDocs();
+
+    const gitSection = gitContext.recentChanges
+      ? `\n## Recent Git Activity\n\`\`\`\n${gitContext.recentChanges}\n\`\`\`\n${gitContext.hotFiles.length > 0 ? `\nFrequently changed files (hot spots):\n${gitContext.hotFiles.map((f) => `- ${f}`).join("\n")}\n` : ""}`
+      : "";
+
+    const docsSection = projectDocs
+      ? `\n## Project Documentation Excerpts\n${projectDocs}\n`
+      : "";
+
     return `You are analyzing this codebase to suggest improvements.
 Do NOT make any changes. Only analyze and suggest.
 
 ## Focus Area: ${category.name}
 ${category.prompt}
-${prefsSection}${alreadyDoneSection}
+${prefsSection}${alreadyDoneSection}${gitSection}${docsSection}
 ## Ignore
 ${ignoreAreas.map((a) => `- ${a}`).join("\n")}
 
@@ -305,12 +443,19 @@ Respond with a JSON array of suggestions (max ${maxSuggestions}):
     "type": "test|docs|security|performance|refactor|bug|chore",
     "priority": 3,
     "estimatedComplexity": "trivial|small|medium|large",
-    "targetFiles": ["path/to/file.ts"]
+    "targetFiles": ["path/to/file.ts"],
+    "impactScore": 7,
+    "effortScore": 3
   }
 ]
 \`\`\`
 
-Be specific and actionable. Each suggestion should be a standalone task that an AI coding agent can execute. Look DEEPER than surface-level issues — find subtle bugs, architectural problems, and non-obvious improvements.`;
+Scoring guide:
+- impactScore (1-10): How much value this adds. 10 = critical bug fix or major feature. 1 = trivial cosmetic.
+- effortScore (1-10): How much work required. 1 = trivial one-liner. 10 = massive rewrite.
+- Priority should factor in impact/effort ratio: high impact + low effort = high priority (1-2).
+
+Be specific and actionable. Each suggestion should be a standalone task that an AI coding agent can execute. Look DEEPER than surface-level issues — find subtle bugs, architectural problems, and non-obvious improvements. Focus especially on "hot" files that change frequently — they benefit most from improvement.`;
   }
 
   private recordSuggestion(
@@ -348,6 +493,9 @@ function parseSuggestions(output: string): BrainstormSuggestion[] {
             targetFiles: Array.isArray(s.targetFiles)
               ? s.targetFiles
               : undefined,
+            impactScore: s.impactScore != null ? Math.min(10, Math.max(1, Number(s.impactScore))) : undefined,
+            effortScore: s.effortScore != null ? Math.min(10, Math.max(1, Number(s.effortScore))) : undefined,
+            source: "ai-analysis" as const,
           }));
       }
     }

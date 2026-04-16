@@ -13,6 +13,7 @@ export const addCommand = new Command("add")
   .option("--files <files>", "Comma-separated target files")
   .option("--budget <usd>", "Per-task budget in USD")
   .option("--depends-on <ids>", "Comma-separated task IDs this depends on")
+  .option("--after <ids>", "Alias for --depends-on: task IDs that must complete first")
   .action((description: string, opts: Record<string, string>) => {
     getDb();
     const task = addTask({
@@ -26,8 +27,8 @@ export const addCommand = new Command("add")
         ? opts.files.split(",").map((s) => s.trim())
         : undefined,
       budgetLimitUsd: opts.budget ? parseFloat(opts.budget) : undefined,
-      dependsOn: opts.dependsOn
-        ? opts.dependsOn.split(",").map((s) => s.trim())
+      dependsOn: (opts.dependsOn || opts.after)
+        ? (opts.dependsOn || opts.after).split(",").map((s) => s.trim())
         : undefined,
     });
 

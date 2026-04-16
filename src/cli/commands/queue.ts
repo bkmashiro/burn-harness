@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { getDb } from "../../db/client.js";
-import { listTasks, getQueueStats } from "../../core/task-queue.js";
+import { listTasks, getQueueStats, renderDependencyTree } from "../../core/task-queue.js";
 import chalk from "chalk";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
@@ -21,6 +21,7 @@ export const queueCommand = new Command("queue")
   .option("-s, --status <status>", "Filter by status")
   .option("-t, --type <type>", "Filter by type")
   .option("--all", "Show all tasks including done/cancelled")
+  .option("--tree", "Show dependency tree")
   .action((opts: Record<string, string | boolean>) => {
     getDb();
 
@@ -67,6 +68,26 @@ export const queueCommand = new Command("queue")
 
       if (task.pr_url) {
         console.log(chalk.dim(`         PR: ${task.pr_url}`));
+      }
+
+      // Show dependency info
+      try {
+        const deps = JSON.parse(task.depends_on) as string[];
+        if (deps.length > 0) {
+          console.log(chalk.dim(`         depends on: ${deps.map(d => d.slice(-6)).join(", ")}`));
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Show dependency tree if requested
+    if (opts.tree) {
+      console.log();
+      console.log(chalk.bold("Dependency Tree"));
+      const tree = renderDependencyTree(tasks);
+      if (tree) {
+        console.log(tree);
+      } else {
+        console.log(chalk.dim("  No dependencies found."));
       }
     }
 

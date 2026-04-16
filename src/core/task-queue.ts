@@ -286,6 +286,131 @@ export function getDailyCostByType(type: string): number {
   return row.total;
 }
 
+/**
+ * Get tasks that are blocked by a given task (i.e., tasks that depend on it).
+ */
+export function getBlockedBy(taskId: string): Task[] {
+  const db = getDb();
+  // Find tasks whose depends_on array contains this taskId
+  const all = db
+    .prepare("SELECT * FROM tasks WHERE status IN ('pending', 'blocked') AND depends_on LIKE ?")
+    .all(`%${taskId}%`) as Task[];
+
+  // Filter to only those that actually have this taskId in their parsed depends_on
+  return all.filter((t) => {
+    try {
+      const deps = JSON.parse(t.depends_on) as string[];
+      return deps.some((d) => d === taskId || taskId.endsWith(d) || d.endsWith(taskId.slice(-6)));
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Get the dependency graph as adjacency lists for display.
+ */
+export function getDependencyGraph(): Map<string, { task: Task; dependsOn: string[]; blocks: string[] }> {
+  const db = getDb();
+  const tasks = db
+    .prepare("SELECT * FROM tasks WHERE status NOT IN ('cancelled') ORDER BY priority ASC, created_at ASC")
+    .all() as Task[];
+
+  const graph = new Map<string, { task: Task; dependsOn: string[]; blocks: string[] }>();
+
+  // Build graph
+  for (const task of tasks) {
+    let deps: string[] = [];
+    try {
+      deps = JSON.parse(task.depends_on) as string[];
+    } catch {
+      deps = [];
+    }
+    graph.set(task.id, { task, dependsOn: deps, blocks: [] });
+  }
+
+  // Compute reverse edges (blocks)
+  for (const [id, entry] of graph) {
+    for (const depId of entry.dependsOn) {
+      // Try exact match first, then suffix match
+      for (const [otherId, otherEntry] of graph) {
+        if (otherId === depId || otherId.endsWith(depId) || depId.endsWith(otherId.slice(-6))) {
+          otherEntry.blocks.push(id);
+          break;
+        }
+      }
+    }
+  }
+
+  return graph;
+}
+
+/**
+ * Render a simple ASCII dependency tree for display.
+ */
+export function renderDependencyTree(tasks: Task[]): string {
+  if (tasks.length === 0) return "";
+
+  const graph = getDependencyGraph();
+  const lines: string[] = [];
+
+  // Find root tasks (no dependencies or all deps done)
+  const roots: string[] = [];
+  const shown = new Set<string>();
+
+  for (const task of tasks) {
+    const entry = graph.get(task.id);
+    if (!entry) continue;
+    if (entry.dependsOn.length === 0) {
+      roots.push(task.id);
+    }
+  }
+
+  // If no roots found (circular or all have deps), just show all
+  if (roots.length === 0) {
+    for (const task of tasks) roots.push(task.id);
+  }
+
+  function renderNode(id: string, prefix: string, isLast: boolean, depth: number): void {
+    if (shown.has(id) || depth > 5) return;
+    shown.add(id);
+
+    const entry = graph.get(id);
+    if (!entry) return;
+    const task = entry.task;
+
+    const connector = depth === 0 ? "" : isLast ? "└── " : "├── ";
+    const shortId = task.id.slice(-6);
+    const status = task.status.padEnd(9);
+    lines.push(`${prefix}${connector}${shortId} ${status} ${task.title.slice(0, 40)}`);
+
+    const blocked = entry.blocks.filter((b) => {
+      const t = graph.get(b);
+      return t && tasks.some((tt) => tt.id === b);
+    });
+
+    for (let i = 0; i < blocked.length; i++) {
+      const childPrefix = prefix + (depth === 0 ? "" : isLast ? "    " : "│   ");
+      renderNode(blocked[i], childPrefix, i === blocked.length - 1, depth + 1);
+    }
+  }
+
+  for (let i = 0; i < roots.length; i++) {
+    renderNode(roots[i], "  ", i === roots.length - 1, 0);
+  }
+
+  // Show any tasks not yet rendered (no connection to roots)
+  for (const task of tasks) {
+    if (!shown.has(task.id)) {
+      const shortId = task.id.slice(-6);
+      const status = task.status.padEnd(9);
+      lines.push(`  ${shortId} ${status} ${task.title.slice(0, 40)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
 export function getQueueStats(): {
   pending: number;
   executing: number;

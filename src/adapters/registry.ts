@@ -1,12 +1,14 @@
 import type { CLIAdapter } from "./types.js";
 import { ClaudeAdapter } from "./claude.js";
 import { CodexAdapter } from "./codex.js";
+import { AnthropicSDKAdapter } from "./anthropic-sdk.js";
 import { CustomAdapter, type CustomAdapterConfig } from "./custom.js";
 import type { BurnConfig } from "../config/schema.js";
 
 const builtinFactories: Record<string, () => CLIAdapter> = {
   claude: () => new ClaudeAdapter(),
   codex: () => new CodexAdapter(),
+  anthropic: () => new AnthropicSDKAdapter(),
 };
 
 export class AdapterRegistry {

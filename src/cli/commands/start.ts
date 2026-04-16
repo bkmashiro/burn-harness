@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { loadConfig } from "../../config/loader.js";
 import { Orchestrator } from "../../core/orchestrator.js";
+import { startDashboard } from "../../dashboard/server.js";
 import { registerInstance, unregisterInstance } from "./ps.js";
 import chalk from "chalk";
 
@@ -9,6 +10,8 @@ export const startCommand = new Command("start")
   .option("--profile <name>", "Use a named config profile")
   .option("--workers <n>", "Override max concurrent agents")
   .option("--no-brainstorm", "Disable brainstorming mode")
+  .option("--dashboard", "Start web monitoring dashboard")
+  .option("--port <n>", "Dashboard port (default: 4242)", "4242")
   .action(async (opts: Record<string, string | boolean>) => {
     const projectRoot = process.cwd();
     const config = loadConfig(projectRoot, opts.profile as string);
@@ -47,6 +50,25 @@ export const startCommand = new Command("start")
     process.on("exit", unregisterInstance);
 
     const orchestrator = new Orchestrator(projectRoot, config, opts.profile as string);
+
+    // Start dashboard if requested
+    if (opts.dashboard) {
+      const dashPort = parseInt(opts.port as string, 10) || 4242;
+      const dashServer = startDashboard({
+        port: dashPort,
+        orchestrator,
+        projectRoot,
+      });
+      console.log(
+        chalk.cyan(`  Dashboard: http://localhost:${dashPort}`)
+      );
+      console.log();
+
+      process.on("exit", () => {
+        dashServer.close();
+      });
+    }
+
     await orchestrator.start();
 
     unregisterInstance();

@@ -11,6 +11,7 @@ import { reportCommand } from "./commands/report.js";
 import { yoloCommand } from "./commands/yolo.js";
 import { newProjectCommand } from "./commands/new-project.js";
 import { psCommand, stopAllCommand, clearCommand } from "./commands/ps.js";
+import { configCommand } from "./commands/config.js";
 import { getDb } from "../db/client.js";
 import { startInteractive } from "./interactive.js";
 
@@ -33,6 +34,7 @@ program.addCommand(newProjectCommand);
 program.addCommand(psCommand);
 program.addCommand(stopAllCommand);
 program.addCommand(clearCommand);
+program.addCommand(configCommand);
 
 // Interactive REPL mode — the default when no subcommand is given
 program

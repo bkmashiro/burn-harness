@@ -8,15 +8,24 @@ const DEFAULT_CONFIG = `# burn-harness configuration
 # See: https://github.com/bkmashiro/burn-harness
 
 cli:
-  preference: [claude]  # Fallback order: claude, codex, aider
+  # Adapter preference order. Available: claude, codex, aider, anthropic
+  # "anthropic" uses the Anthropic SDK directly (no CLI dependency needed)
+  preference: [claude]
 
   claude:
     # Model selection: string or array (first = primary, rest = fallbacks)
-    model: [sonnet, opus]     # Try sonnet first, fall back to opus
-    # Required for autonomous operation (--print mode can't prompt for approval)
+    model: [sonnet, opus]     # Try sonnet first, fall back to opus on rate-limit
     permissionMode: dangerously-skip
-    # appendSystemPrompt: |
-    #   Follow project conventions strictly.
+
+  # anthropic:                 # Native Anthropic SDK adapter (requires ANTHROPIC_API_KEY)
+  #   model: [sonnet, opus]
+  #   maxBudgetPerTask: 5.00
+
+  # codex:
+  #   model: codex-mini
+
+  # aider:
+  #   model: sonnet
 
 git:
   baseBranch: main
@@ -24,15 +33,16 @@ git:
   autoCreatePR: true
   draftPR: true
   # reviewers: [alice, bob]
+  # commitTemplate: "burn({type}): {title} [{taskId}]"
 
 execution:
   maxConcurrentAgents: 1
   taskTimeoutMinutes: 30
   maxAttemptsPerTask: 3
+  # pollIntervalSeconds: 10
 
 safety:
   # All budget limits are OPTIONAL. If not set, burn runs with no caps.
-  # Uncomment any limits you want to enforce:
 
   # USD limits
   # maxBudgetPerTaskUsd: 5.00    # Per-task spending cap
@@ -40,16 +50,19 @@ safety:
   # maxBudgetTotalUsd: 500.00    # Lifetime cap
 
   # Token limits
-  # maxTokensPerTask: 100000     # Max tokens per task
-  # maxTokensPerDay: 1000000     # Max tokens per day
-  # maxTokensTotal: 10000000     # Lifetime token cap
+  # maxTokensPerTask: 100000
+  # maxTokensPerDay: 1000000
+  # maxTokensTotal: 10000000
 
   # Time limits
-  # maxRuntimePerTaskMinutes: 30      # Max wall-clock per task
-  # maxRuntimePerDayMinutes: 480      # Max agent runtime per day (8h)
-  # maxRuntimePerSessionHours: 12     # Max single session length
+  # maxRuntimePerTaskMinutes: 30
+  # maxRuntimePerDayMinutes: 480      # 8 hours
+  # maxRuntimePerSessionHours: 12
 
-  # Budget allocation by task type (% of daily budget)
+  # Cost warning: logs a warning when daily cost exceeds this (default $5)
+  costWarningThresholdUsd: 5
+
+  # Budget allocation by task type (% of daily budget, must sum <= 100)
   # budgetAllocation:
   #   feature: 40
   #   bug: 30
@@ -64,7 +77,7 @@ safety:
 
 brainstorm:
   enabled: true
-  focusAreas: [tests, docs, security, performance]
+  focusAreas: [tests, docs, security, performance, code-quality]
   model: sonnet
   maxSuggestionsPerRun: 5
   intervalMinutes: 60
